@@ -8,7 +8,7 @@ import os
 import traceback
 
 # Thêm path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from PyQt5.QtWidgets import QApplication, QMessageBox
 from PyQt5.QtCore import Qt
@@ -44,7 +44,7 @@ from app.api.face_api import FaceAPI
 from app.api.database_api import DatabaseAPI
 
 # ================================================================
-# UI - IMPORT TRỰC TIẾP, KHÔNG QUA __init__
+# UI
 # ================================================================
 
 from app.ui.main_window import FaceSecureApp
@@ -60,58 +60,62 @@ from app.utils.logger import logger
 # KHỞI TẠO HỆ THỐNG
 # ================================================================
 
+# Biến global để lưu recognizer
+_recognizer = None
+# app/main.py
+# ================================================================
+# FACESECURE - ĐIỂM KHỞI CHẠY
+# ================================================================
+
+# ... (imports khác)
+
+# ================================================================
+# KHỞI TẠO HỆ THỐNG
+# ================================================================
+
 def khoi_tao_he_thong():
     """Khởi tạo toàn bộ hệ thống"""
+    global _recognizer
 
     logger.info("=" * 60)
     logger.info("FACESECURE - KHỞI TẠO HỆ THỐNG")
     logger.info("=" * 60)
 
     try:
-        # ------------------------------------------------------------
         # 1. DATABASE
-        # ------------------------------------------------------------
-
         logger.info("[1] Khởi tạo cơ sở dữ liệu...")
-        database = CoSoDuLieu()
+        
+        def on_database_change():
+            logger.info("[Database] Phát hiện thay đổi, refresh cache...")
+            if _recognizer is not None:
+                _recognizer.refresh_cache()
+                logger.info("[Database] Cache đã được refresh")
+        
+        database = CoSoDuLieu(on_change_callback=on_database_change)
         logger.info(f"    Đã tải {len(database.lay_tat_ca_nguoi())} người dùng")
 
-        # ------------------------------------------------------------
-        # 2. MTCNN - PHÁT HIỆN KHUÔN MẶT
-        # ------------------------------------------------------------
-
+        # 2. MTCNN
         logger.info("[2] Khởi tạo MTCNN...")
         detector = PhatHienKhuonMat()
         logger.info("    OK")
 
-        # ------------------------------------------------------------
-        # 3. FACENET - TRÍCH XUẤT EMBEDDING
-        # ------------------------------------------------------------
-
+        # 3. FACENET
         logger.info("[3] Khởi tạo FaceNet...")
         embedder = FaceEmbedder(detector)
         logger.info("    OK")
 
-        # ------------------------------------------------------------
-        # 4. COSINE MATCHER
-        # ------------------------------------------------------------
-
+        # 4. MATCHER
         logger.info("[4] Khởi tạo Face Matcher...")
         matcher = FaceMatcher()
         logger.info("    OK")
 
-        # ------------------------------------------------------------
         # 5. RECOGNIZER
-        # ------------------------------------------------------------
-
         logger.info("[5] Khởi tạo Face Recognizer...")
         recognizer = FaceRecognizer(embedder, matcher, database)
+        _recognizer = recognizer
         logger.info("    OK")
 
-        # ------------------------------------------------------------
-        # 6. SERVICES
-        # ------------------------------------------------------------
-
+        # 6. SERVICES - Sử dụng FaceProcessor bên trong
         logger.info("[6] Khởi tạo Services...")
         dich_vu_dang_ky = DichVuDangKy(embedder, database)
         dich_vu_nhan_dang = DichVuNhanDang(recognizer)
@@ -120,22 +124,12 @@ def khoi_tao_he_thong():
         logger.info("    Nhận dạng 1:N : OK")
         logger.info("    Xác minh 1:1  : OK")
 
-        # ------------------------------------------------------------
         # 7. FACE API
-        # ------------------------------------------------------------
-
         logger.info("[7] Khởi tạo Face API...")
-        face_api = FaceAPI(
-            dich_vu_dang_ky,
-            dich_vu_nhan_dang,
-            dich_vu_xac_minh
-        )
+        face_api = FaceAPI(dich_vu_dang_ky, dich_vu_nhan_dang, dich_vu_xac_minh)
         logger.info("    OK")
 
-        # ------------------------------------------------------------
         # 8. DATABASE API
-        # ------------------------------------------------------------
-
         logger.info("[8] Khởi tạo Database API...")
         database_api = DatabaseAPI(database)
         logger.info("    OK")
@@ -151,7 +145,6 @@ def khoi_tao_he_thong():
         traceback.print_exc()
         return None
 
-
 # ================================================================
 # MAIN
 # ================================================================
@@ -161,11 +154,10 @@ def main():
 
     logger.info("🔄 Bắt đầu chương trình...")
 
-    # Tạo ứng dụng PyQt NGAY LẬP TỨC
+    # Tạo ứng dụng PyQt
     app = QApplication(sys.argv)
     app.setStyle('Fusion')
     
-    # Set stylesheet toàn cục
     app.setStyleSheet("""
         QMainWindow {
             background-color: #F8FAFC;
@@ -173,7 +165,6 @@ def main():
     """)
 
     try:
-        # Khởi tạo hệ thống
         he_thong = khoi_tao_he_thong()
         
         if he_thong is None:
@@ -186,7 +177,6 @@ def main():
 
         (face_api, database_api, detector, embedder, database) = he_thong
 
-        # Khởi tạo giao diện chính
         logger.info("🔄 Đang khởi tạo giao diện...")
         cua_so = FaceSecureApp(
             face_api=face_api,
@@ -196,11 +186,9 @@ def main():
             database=database
         )
 
-        # Hiển thị
         cua_so.showMaximized()
         logger.info("✅ Giao diện đã hiển thị")
 
-        # Chạy vòng lặp sự kiện
         sys.exit(app.exec_())
 
     except KeyboardInterrupt:

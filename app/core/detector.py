@@ -1,6 +1,6 @@
 # app/core/detector.py
 # ================================================================
-# PHÁT HIỆN KHUÔN MẶT - CHUẨN HÓA NÂNG CAO
+# PHÁT HIỆN KHUÔN MẶT - HỖ TRỢ GPU + DETECT NHANH
 # ================================================================
 
 import cv2
@@ -10,23 +10,12 @@ from facenet_pytorch import MTCNN
 
 from app.config import settings
 from app.config.settings import THIET_BI
+# ✅ ĐẢM BẢO IMPORT ĐÚNG
+from app.utils.logger import logger
 
 
 class PhatHienKhuonMat:
-    """Singleton - Chỉ có một instance duy nhất"""
-
-    _instance = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
-
     def __init__(self):
-        if self._initialized:
-            return
-
         self.mtcnn = MTCNN(
             image_size=160,
             margin=0,
@@ -36,29 +25,19 @@ class PhatHienKhuonMat:
             post_process=True,
             device=THIET_BI
         )
-
-        # ✅ Thông số chuẩn hóa từ settings
+        
         self.use_clahe = getattr(settings, 'SU_DUNG_CLAHE', True)
         self.use_denoise = getattr(settings, 'SU_DUNG_DENOISE', True)
         self.use_sharpen = getattr(settings, 'SU_DUNG_SHARPEN', True)
         self.alpha = getattr(settings, 'ALPHA_CONTRAST', 1.2)
         self.beta = getattr(settings, 'BETA_BRIGHTNESS', 10)
 
-        self._initialized = True
-
-    # ============================================================
-    # CHUYỂN ĐỔI
-    # ============================================================
-
     def chuyen_sang_pil(self, anh_bgr):
         anh_rgb = cv2.cvtColor(anh_bgr, cv2.COLOR_BGR2RGB)
         return Image.fromarray(anh_rgb)
 
-    # ... các phương thức còn lại giữ nguyên, không cần sửa ...
-    # (giữ nguyên toàn bộ code cũ của detector)
-
     # ============================================================
-    # PHÁT HIỆN KHUÔN MẶT
+    # DETECT CHUẨN
     # ============================================================
 
     def phat_hien(self, anh_bgr):
@@ -115,99 +94,156 @@ class PhatHienKhuonMat:
             return [], []
 
     # ============================================================
-    # ✅ CHUẨN HÓA ẢNH NÂNG CAO
+    # DETECT NHANH (DÙNG ẢNH NHỎ) - TĂNG TỐC ĐỘ
+    # ============================================================
+
+    def phat_hien_nhanh(self, anh_bgr, scale=0.5):
+        """
+        Phát hiện khuôn mặt nhanh - dùng ảnh nhỏ để tăng tốc
+        Trả về box đã được scale lại về kích thước gốc
+        """
+        if anh_bgr is None:
+            return None, 0.0
+
+        h, w = anh_bgr.shape[:2]
+        
+        # Resize ảnh nhỏ để detect nhanh
+        if scale < 1.0:
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            anh_nho = cv2.resize(anh_bgr, (new_w, new_h))
+        else:
+            anh_nho = anh_bgr
+
+        anh_pil = self.chuyen_sang_pil(anh_nho)
+        
+        # Detect trên ảnh nhỏ
+        boxes, probs = self.mtcnn.detect(anh_pil)
+
+        if boxes is None or len(boxes) == 0:
+            return None, 0.0
+
+        # Chọn khuôn mặt lớn nhất
+        best_box = None
+        best_prob = 0.0
+        best_area = -1
+
+        for i, box in enumerate(boxes):
+            x1, y1, x2, y2 = box
+            area = (x2 - x1) * (y2 - y1)
+            if area > best_area:
+                best_area = area
+                best_box = box
+                if probs is not None:
+                    best_prob = float(probs[i])
+
+        # Scale lại box về kích thước gốc
+        if best_box is not None and scale < 1.0:
+            scale_factor = 1.0 / scale
+            x1, y1, x2, y2 = best_box
+            best_box = (
+                int(x1 * scale_factor),
+                int(y1 * scale_factor),
+                int(x2 * scale_factor),
+                int(y2 * scale_factor)
+            )
+
+        return best_box, best_prob
+
+    def phat_hien_tat_ca_nhanh(self, anh_bgr, scale=0.5):
+        """Phát hiện tất cả khuôn mặt trên ảnh thu nhỏ"""
+        if anh_bgr is None:
+            return [], []
+
+        h, w = anh_bgr.shape[:2]
+        if scale < 1.0:
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            anh_nho = cv2.resize(anh_bgr, (new_w, new_h))
+        else:
+            anh_nho = anh_bgr
+
+        anh_pil = self.chuyen_sang_pil(anh_nho)
+        boxes, probs = self.mtcnn.detect(anh_pil)
+
+        if boxes is None:
+            return [], []
+
+        boxes_list = []
+        probs_list = []
+
+        for i, box in enumerate(boxes):
+            if scale < 1.0:
+                scale_factor = 1.0 / scale
+                x1, y1, x2, y2 = box
+                box = (
+                    int(x1 * scale_factor),
+                    int(y1 * scale_factor),
+                    int(x2 * scale_factor),
+                    int(y2 * scale_factor)
+                )
+            boxes_list.append(box)
+            probs_list.append(float(probs[i]) if probs is not None else 0.0)
+
+        return boxes_list, probs_list
+
+    # ============================================================
+    # CHUẨN HÓA ẢNH
     # ============================================================
 
     def chuan_hoa_anh_sang(self, image):
-        """Chuẩn hóa ánh sáng bằng CLAHE"""
         if not self.use_clahe:
             return image
-        
         try:
-            # Chuyển sang LAB
             lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
             l, a, b = cv2.split(lab)
-            
-            # CLAHE trên kênh L
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             l_clahe = clahe.apply(l)
-            
-            # Ghép lại
             lab_clahe = cv2.merge([l_clahe, a, b])
             result = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2BGR)
-            
             return result
         except Exception as e:
             return image
 
     def tang_cuong_chat_luong(self, image):
-        """Tăng cường chất lượng ảnh"""
         result = image.copy()
-        
-        # 1. Giảm nhiễu
         if self.use_denoise:
             try:
                 result = cv2.fastNlMeansDenoisingColored(result, None, 10, 10, 7, 21)
             except:
                 pass
-        
-        # 2. Tăng độ tương phản
         try:
             result = cv2.convertScaleAbs(result, alpha=self.alpha, beta=self.beta)
         except:
             pass
-        
-        # 3. Làm sắc nét
         if self.use_sharpen:
             try:
-                kernel = np.array([[-1, -1, -1],
-                                   [-1,  9, -1],
-                                   [-1, -1, -1]])
+                kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]])
                 result = cv2.filter2D(result, -1, kernel)
             except:
                 pass
-        
         return result
 
     def chuan_hoa_anh(self, image):
-        """Chuẩn hóa ảnh hoàn chỉnh"""
-        # 1. Chuẩn hóa ánh sáng
         result = self.chuan_hoa_anh_sang(image)
-        
-        # 2. Tăng cường chất lượng
         result = self.tang_cuong_chat_luong(result)
-        
         return result
 
     # ============================================================
-    # ✅ CĂN CHỈNH KHUÔN MẶT NÂNG CAO
+    # CĂN CHỈNH KHUÔN MẶT
     # ============================================================
 
     def can_chinh_khuon_mat_nang_cao(self, anh_bgr):
-        """
-        Căn chỉnh khuôn mặt với tiền xử lý nâng cao
-        
-        Bước:
-        1. Phát hiện khuôn mặt
-        2. Cắt ROI với margin
-        3. Chuẩn hóa ánh sáng
-        4. Tăng cường chất lượng
-        5. Resize về 160x160
-        6. Căn chỉnh với MTCNN
-        """
         try:
-            # 1. Phát hiện khuôn mặt
             anh_pil = self.chuyen_sang_pil(anh_bgr)
             boxes, probs = self.mtcnn.detect(anh_pil)
             
             if boxes is None or len(boxes) == 0:
                 return None
             
-            # Chọn khuôn mặt lớn nhất
             box = boxes[0]
             x1, y1, x2, y2 = map(int, box)
             
-            # 2. Cắt khuôn mặt với margin
             margin = int((x2 - x1) * 0.2)
             x1 = max(0, x1 - margin)
             y1 = max(0, y1 - margin)
@@ -219,16 +255,9 @@ class PhatHienKhuonMat:
             if face_roi.size == 0:
                 return None
             
-            # 3. Chuẩn hóa ảnh
             face_roi = self.chuan_hoa_anh(face_roi)
-            
-            # 4. Resize về 160x160
             face_roi = cv2.resize(face_roi, (160, 160))
-            
-            # 5. Chuyển sang PIL
             face_pil = Image.fromarray(cv2.cvtColor(face_roi, cv2.COLOR_BGR2RGB))
-            
-            # 6. Căn chỉnh với MTCNN
             aligned_face = self.mtcnn(face_pil)
             
             return aligned_face
@@ -238,7 +267,6 @@ class PhatHienKhuonMat:
             return None
 
     def can_chinh_khuon_mat(self, anh_bgr):
-        """Căn chỉnh khuôn mặt cơ bản"""
         try:
             anh_pil = self.chuyen_sang_pil(anh_bgr)
             khuon_mat = self.mtcnn(anh_pil)
@@ -248,7 +276,7 @@ class PhatHienKhuonMat:
             return None
 
     # ============================================================
-    # VẼ KHUNG (GIỮ NGUYÊN)
+    # VẼ KHUNG
     # ============================================================
 
     def ve_khung(self, anh_bgr, box, mau_khung=(0, 255, 0), do_day=2):

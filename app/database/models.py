@@ -6,21 +6,13 @@ from typing import List
 class NguoiDung:
 
     id: int
-
     name: str
-
     age: str
-
     home: str
-
     class_name: str
-
     major: str
-
     embedding: List[float]
-
     embedding_dimension: int = 512
-
     image_count: int = 0
 
     def to_dict(self):
@@ -28,7 +20,6 @@ class NguoiDung:
 
     @staticmethod
     def from_dict(data):
-
         return NguoiDung(
             id=int(data["id"]),
             name=data.get("name", ""),
@@ -37,10 +28,6 @@ class NguoiDung:
             class_name=data.get("class_name", data.get("class", "")),
             major=data.get("major", ""),
             embedding=list(data["embedding"]),
-            embedding_dimension=int(
-                data.get("embedding_dimension", 512)
-            ),
-            image_count=int(
-                data.get("image_count", 0)
-            )
+            embedding_dimension=int(data.get("embedding_dimension", 512)),
+            image_count=int(data.get("image_count", 0))
         )

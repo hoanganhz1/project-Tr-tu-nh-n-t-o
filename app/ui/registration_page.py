@@ -1,10 +1,11 @@
 # app/ui/registration_page.py
 # ================================================================
-# ĐĂNG KÝ KHUÔN MẶT - ĐỒNG BỘ 30FPS
+# ĐĂNG KÝ KHUÔN MẶT - PHƯƠNG ÁN CŨ (ỔN ĐỊNH)
 # ================================================================
 
 import cv2
 import time
+import numpy as np
 
 from PyQt5.QtWidgets import (
     QWidget,
@@ -22,11 +23,12 @@ from PyQt5.QtGui import QImage, QPixmap
 
 from app.utils.camera_manager import CameraManager
 from app.utils.worker import TrichXuatWorker
+from app.config.settings import CUDA_AVAILABLE, DEFAULT_FPS
 from app.utils.logger import logger
 
 
 class RegistrationPage(QWidget):
-    """Trang đăng ký khuôn mặt - Đồng bộ 30FPS"""
+    """Trang đăng ký khuôn mặt - Phương án cũ ổn định"""
 
     def __init__(self, face_api, embedder):
         super().__init__()
@@ -43,9 +45,16 @@ class RegistrationPage(QWidget):
         # Buffer và mutex
         self.frame_buffer = None
         self.buffer_mutex = QMutex()
+        
+        # Cấu hình tốc độ
+        self.has_gpu = CUDA_AVAILABLE
+        self.FPS_CAMERA = DEFAULT_FPS
+        self.DISPLAY_INTERVAL = 33  # 30fps cho ổn định
+        self.KHOANG_CACH_TOI_THIEU = 100  # 100ms
+
         self.display_timer = QTimer()
         self.display_timer.timeout.connect(self._update_display)
-        self.display_timer.start(33)  # ~30fps
+        self.display_timer.start(self.DISPLAY_INTERVAL)
 
         # Trạng thái đăng ký
         self.dang_quay = False
@@ -56,7 +65,6 @@ class RegistrationPage(QWidget):
         # Flag xử lý
         self.dang_xu_ly_anh = False
         self.lan_cuoi_xu_ly = 0
-        self.KHOANG_CACH_TOI_THIEU = 66  # ms (~15 lần/giây)
 
         # ThreadPool
         self.threadpool = QThreadPool.globalInstance()
@@ -64,11 +72,7 @@ class RegistrationPage(QWidget):
         # Tạo giao diện
         self.tao_giao_dien()
 
-        logger.info("[Registration] Đã khởi tạo (Đồng bộ 30FPS)")
-
-    # ============================================================
-    # GIAO DIỆN (GIỮ NGUYÊN)
-    # ============================================================
+        logger.info(f"[Registration] Đã khởi tạo (GPU={self.has_gpu})")
 
     def tao_giao_dien(self):
         """Tạo giao diện"""
@@ -79,7 +83,6 @@ class RegistrationPage(QWidget):
 
         noi_dung = QHBoxLayout()
 
-        # FORM THÔNG TIN
         khung_form = QFrame()
         khung_form.setStyleSheet("""
             QFrame {
@@ -157,7 +160,6 @@ class RegistrationPage(QWidget):
 
         noi_dung.addWidget(khung_form, 1)
 
-        # CAMERA
         khung_camera = QFrame()
         khung_camera.setStyleSheet("""
             QFrame {
@@ -216,43 +218,29 @@ class RegistrationPage(QWidget):
 
         bo_cuc.addLayout(noi_dung)
 
-    # ============================================================
-    # QUẢN LÝ TRANG ACTIVE
-    # ============================================================
-
     def set_active(self, active: bool):
         self.active = active
         if active:
             if not self.camera_manager.is_opened():
-                self.camera_manager.start(fps=30)
+                self.camera_manager.start(fps=self.FPS_CAMERA)
             self.camera_manager.resume()
             if not self.display_timer.isActive():
-                self.display_timer.start(33)
+                self.display_timer.start(self.DISPLAY_INTERVAL)
             self.hien_thi_camera.setText("📷 Camera")
-            logger.info("[Registration] Active: BẬT (30fps)")
+            logger.info(f"[Registration] Active: BẬT")
         else:
             logger.info("[Registration] Active: TẮT")
             self.camera_manager.pause()
             self.hien_thi_camera.setText("⏸️ Camera tạm dừng")
 
-    # ============================================================
-    # XỬ LÝ FRAME TỪ CAMERA MANAGER
-    # ============================================================
-
     def cap_nhat_camera(self, anh_bgr):
-        """Nhận frame từ CameraManager - Lưu vào buffer"""
         if not self.active or anh_bgr is None:
             return
         
         with QMutexLocker(self.buffer_mutex):
             self.frame_buffer = anh_bgr.copy()
 
-    # ============================================================
-    # HIỂN THỊ (GỌI BỞI TIMER)
-    # ============================================================
-
     def _update_display(self):
-        """Cập nhật hiển thị từ buffer (30fps)"""
         if not self.active:
             return
         
@@ -261,8 +249,8 @@ class RegistrationPage(QWidget):
                 return
             anh = self.frame_buffer.copy()
         
-        # Vẽ khung
-        box, _ = self.detector.phat_hien(anh)
+        # Phát hiện và vẽ khung
+        box, _ = self.detector.phat_hien_nhanh(anh, scale=0.5)
         if box is not None:
             mau = (0, 255, 255) if self.dang_quay else (100, 200, 100)
             do_day = 2 if self.dang_quay else 1
@@ -270,46 +258,59 @@ class RegistrationPage(QWidget):
         
         self._hien_thi_anh(anh)
         
-        # Xử lý đăng ký (tần suất thấp)
+        # Xử lý đăng ký
         if self.dang_quay and not self.dang_xu_ly_anh:
             current_time = time.time() * 1000
             if current_time - self.lan_cuoi_xu_ly >= self.KHOANG_CACH_TOI_THIEU:
                 self.xu_ly_anh_dang_ky()
 
     def _hien_thi_anh(self, anh_bgr):
-        """Hiển thị ảnh lên QLabel"""
         if anh_bgr is None:
             return
-        anh_rgb = cv2.cvtColor(anh_bgr, cv2.COLOR_BGR2RGB)
-        cao, rong, kenh = anh_rgb.shape
-        anh_qt = QImage(anh_rgb.data, rong, cao, kenh * rong, QImage.Format_RGB888)
-        self.hien_thi_camera.setPixmap(
-            QPixmap.fromImage(anh_qt).scaled(
-                self.hien_thi_camera.size(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
+        try:
+            anh_rgb = cv2.cvtColor(anh_bgr, cv2.COLOR_BGR2RGB)
+            cao, rong, kenh = anh_rgb.shape
+            anh_qt = QImage(anh_rgb.data, rong, cao, kenh * rong, QImage.Format_RGB888)
+            self.hien_thi_camera.setPixmap(
+                QPixmap.fromImage(anh_qt).scaled(
+                    self.hien_thi_camera.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
             )
-        )
-
-    # ============================================================
-    # XỬ LÝ ĐĂNG KÝ (DÙNG WORKER)
-    # ============================================================
+        except Exception as e:
+            logger.error(f"[Registration] Lỗi hiển thị: {e}")
 
     def xu_ly_anh_dang_ky(self):
-        """Xử lý ảnh để trích xuất embedding"""
+        """Xử lý ảnh đăng ký"""
         with QMutexLocker(self.buffer_mutex):
             if self.frame_buffer is None:
                 return
             anh = self.frame_buffer.copy()
 
+        # Phát hiện khuôn mặt
         box, _ = self.detector.phat_hien(anh)
         if box is None:
+            return
+
+        # Cắt ROI
+        x1, y1, x2, y2 = box
+        margin = int((x2 - x1) * 0.1)
+        x1 = max(0, x1 - margin)
+        y1 = max(0, y1 - margin)
+        x2 = min(anh.shape[1], x2 + margin)
+        y2 = min(anh.shape[0], y2 + margin)
+        
+        face_roi = anh[y1:y2, x1:x2]
+        
+        if face_roi.size == 0:
             return
 
         self.dang_xu_ly_anh = True
         self.lan_cuoi_xu_ly = time.time() * 1000
 
-        worker = TrichXuatWorker(self.embedder, anh, use_advanced=True)
+        # Trích xuất embedding
+        worker = TrichXuatWorker(self.embedder, face_roi, use_advanced=True)
         worker.signals.result.connect(self.nhan_embedding)
         worker.signals.error.connect(self.xu_ly_loi_trich_xuat)
         worker.signals.finished.connect(self.don_dep_luong)
@@ -322,6 +323,7 @@ class RegistrationPage(QWidget):
 
         self.danh_sach_embedding.append(embedding)
         self.bo_dem_anh = len(self.danh_sach_embedding)
+        
         self.nhan_thong_bao.setText(f"📸 Đang thu thập: {self.bo_dem_anh}/{self.SO_MAU_CAN}")
         self.nhan_thong_bao.setStyleSheet("""
             QLabel {
@@ -344,12 +346,7 @@ class RegistrationPage(QWidget):
     def don_dep_luong(self):
         pass
 
-    # ============================================================
-    # ĐĂNG KÝ
-    # ============================================================
-
     def bat_dau_dang_ky(self):
-        """Bắt đầu quá trình đăng ký"""
         if not self.o_ten.text().strip():
             QMessageBox.warning(self, "Thiếu thông tin", "Vui lòng nhập họ và tên.")
             return
@@ -360,6 +357,7 @@ class RegistrationPage(QWidget):
                 QMessageBox.critical(self, "Lỗi camera", "Không thể mở camera.")
                 return
 
+        # Reset
         self.danh_sach_embedding = []
         self.bo_dem_anh = 0
         self.dang_quay = True
@@ -383,7 +381,7 @@ class RegistrationPage(QWidget):
         logger.info("[Registration] Bắt đầu đăng ký")
 
     def ket_thuc_thu_thap(self):
-        """Kết thúc thu thập và lưu dữ liệu"""
+        """Kết thúc thu thập và đăng ký"""
         self.dang_quay = False
         self.dang_xu_ly_anh = False
 
@@ -398,8 +396,11 @@ class RegistrationPage(QWidget):
             }
         """)
 
-        if len(self.danh_sach_embedding) < 5:
-            self.nhan_thong_bao.setText("❌ Không đủ embedding chất lượng")
+        # Kiểm tra số lượng embedding
+        valid_embeddings = [emb for emb in self.danh_sach_embedding if emb is not None]
+        
+        if len(valid_embeddings) < 5:
+            self.nhan_thong_bao.setText(f"❌ Chỉ có {len(valid_embeddings)}/20 embedding hợp lệ")
             self.nhan_thong_bao.setStyleSheet("""
                 QLabel {
                     font-size: 14px;
@@ -412,7 +413,7 @@ class RegistrationPage(QWidget):
             QMessageBox.warning(
                 self,
                 "Không đủ dữ liệu",
-                f"Chỉ thu được {len(self.danh_sach_embedding)}/20 embedding chất lượng.\nVui lòng thử lại."
+                f"Chỉ thu được {len(valid_embeddings)}/20 embedding chất lượng.\nVui lòng thử lại."
             )
             self.nut_dang_ky.setEnabled(True)
             self.nut_lam_moi.setEnabled(True)
@@ -427,7 +428,8 @@ class RegistrationPage(QWidget):
         }
 
         try:
-            ket_qua = self.face_api.register(thong_tin, self.danh_sach_embedding)
+            # Gọi API đăng ký với danh sách embedding
+            ket_qua = self.face_api.register(thong_tin, valid_embeddings)
 
             self.nhan_thong_bao.setText("✅ Đăng ký thành công!")
             self.nhan_thong_bao.setStyleSheet("""
@@ -444,7 +446,7 @@ class RegistrationPage(QWidget):
                 self,
                 "Thành công",
                 f"✅ Đã đăng ký khuôn mặt cho {thong_tin['name']}\n"
-                f"📸 Số ảnh chất lượng: {len(self.danh_sach_embedding)}"
+                f"📸 Số ảnh chất lượng: {len(valid_embeddings)}"
             )
 
             logger.info(f"[Registration] Đăng ký thành công")
@@ -466,12 +468,7 @@ class RegistrationPage(QWidget):
             self.nut_dang_ky.setEnabled(True)
             self.nut_lam_moi.setEnabled(True)
 
-    # ============================================================
-    # LÀM MỚI
-    # ============================================================
-
     def lam_moi(self):
-        """Làm mới form"""
         self.dang_quay = False
         self.dang_xu_ly_anh = False
         self.danh_sach_embedding = []
@@ -499,10 +496,6 @@ class RegistrationPage(QWidget):
         """)
 
         logger.info("[Registration] Đã làm mới form")
-
-    # ============================================================
-    # ĐÓNG
-    # ============================================================
 
     def closeEvent(self, su_kien):
         self.active = False

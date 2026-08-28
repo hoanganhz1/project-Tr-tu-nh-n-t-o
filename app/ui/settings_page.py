@@ -5,6 +5,7 @@
 
 import os
 import json
+import torch  # ✅ THÊM IMPORT NÀY
 
 from PyQt5.QtWidgets import (
     QWidget,
@@ -26,19 +27,18 @@ from app.config.constants import (
     MIN_COSINE_THRESHOLD,
     MAX_COSINE_THRESHOLD
 )
+from app.config.settings import CUDA_AVAILABLE, THIET_BI
 from app.utils.logger import logger
 
 
 class SettingsPage(QWidget):
     """Trang cài đặt - TỰ ĐỘNG LOAD/SAVE"""
 
-    # Signal gửi cả 2 threshold lên main
     threshold_changed = pyqtSignal(float, float)
 
     def __init__(self):
         super().__init__()
 
-        # ✅ Lấy threshold từ config (đã được load tự động)
         self.threshold_nhan_dang = getattr(
             settings,
             'NGUONG_NHAN_DANG',
@@ -52,22 +52,13 @@ class SettingsPage(QWidget):
 
         self.tao_giao_dien()
 
-    # ============================================================
-    # GIAO DIỆN
-    # ============================================================
-
     def tao_giao_dien(self):
-        """Tạo giao diện"""
-
         bo_cuc = QVBoxLayout(self)
         bo_cuc.setContentsMargins(40, 35, 40, 35)
 
         bo_cuc.addWidget(QLabel("<h1>⚙️ CÀI ĐẶT THUẬT TOÁN</h1>"))
 
-        # ========================================================
-        # THRESHOLD NHẬN DẠNG 1:N
-        # ========================================================
-
+        # Threshold nhận dạng
         khung_nhan_dang = QFrame()
         khung_nhan_dang.setStyleSheet("""
             QFrame {
@@ -81,9 +72,7 @@ class SettingsPage(QWidget):
         layout_nhan_dang.setContentsMargins(30, 20, 30, 20)
 
         header_nhan_dang = QHBoxLayout()
-        header_nhan_dang.addWidget(QLabel(
-            "<b>🔄 Nhận dạng 1:N</b>"
-        ))
+        header_nhan_dang.addWidget(QLabel("<b>🔄 Nhận dạng 1:N</b>"))
         header_nhan_dang.addStretch()
         header_nhan_dang.addWidget(QLabel("Giá trị: "))
         self.label_nhan_dang = QLabel(f"{self.threshold_nhan_dang:.2f}")
@@ -114,16 +103,11 @@ class SettingsPage(QWidget):
         range_layout.addWidget(QLabel(f"Nới ({MAX_COSINE_THRESHOLD:.2f})"))
         layout_nhan_dang.addLayout(range_layout)
 
-        layout_nhan_dang.addWidget(QLabel(
-            "💡 Khuyến nghị: 0.30 - 0.40"
-        ))
+        layout_nhan_dang.addWidget(QLabel("💡 Khuyến nghị: 0.30 - 0.40"))
 
         bo_cuc.addWidget(khung_nhan_dang)
 
-        # ========================================================
-        # THRESHOLD XÁC MINH 1:1
-        # ========================================================
-
+        # Threshold xác minh
         khung_xac_minh = QFrame()
         khung_xac_minh.setStyleSheet("""
             QFrame {
@@ -137,9 +121,7 @@ class SettingsPage(QWidget):
         layout_xac_minh.setContentsMargins(30, 20, 30, 20)
 
         header_xac_minh = QHBoxLayout()
-        header_xac_minh.addWidget(QLabel(
-            "<b>✅ Xác minh 1:1</b>"
-        ))
+        header_xac_minh.addWidget(QLabel("<b>✅ Xác minh 1:1</b>"))
         header_xac_minh.addStretch()
         header_xac_minh.addWidget(QLabel("Giá trị: "))
         self.label_xac_minh = QLabel(f"{self.threshold_xac_minh:.2f}")
@@ -170,16 +152,11 @@ class SettingsPage(QWidget):
         range_layout_2.addWidget(QLabel(f"Nới ({MAX_COSINE_THRESHOLD:.2f})"))
         layout_xac_minh.addLayout(range_layout_2)
 
-        layout_xac_minh.addWidget(QLabel(
-            "💡 Khuyến nghị: 0.25 - 0.35 (khắt khe hơn 1:N)"
-        ))
+        layout_xac_minh.addWidget(QLabel("💡 Khuyến nghị: 0.25 - 0.35 (khắt khe hơn 1:N)"))
 
         bo_cuc.addWidget(khung_xac_minh)
 
-        # ========================================================
-        # NÚT LƯU
-        # ========================================================
-
+        # Nút lưu
         khung_nut = QHBoxLayout()
         khung_nut.addStretch()
 
@@ -204,10 +181,7 @@ class SettingsPage(QWidget):
         khung_nut.addStretch()
         bo_cuc.addLayout(khung_nut)
 
-        # ========================================================
-        # THÔNG TIN
-        # ========================================================
-
+        # Thông tin hệ thống
         khung_thong_tin = QFrame()
         khung_thong_tin.setStyleSheet("""
             QFrame {
@@ -221,15 +195,20 @@ class SettingsPage(QWidget):
         layout_thong_tin = QVBoxLayout(khung_thong_tin)
         layout_thong_tin.addWidget(QLabel("<b>🔧 Thông tin hệ thống</b>"))
 
-        device = getattr(settings, 'THIET_BI', 'CPU')
         model = getattr(settings, 'TEN_MODEL', 'vggface2')
         emb_dim = getattr(settings, 'CHIEU_EMBEDDING', 512)
+        
+        # ✅ SỬA LỖI: kiểm tra CUDA_AVAILABLE từ settings
+        if CUDA_AVAILABLE:
+            device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "Unknown"
+            device = f"GPU - {device_name}"
+        else:
+            device = "CPU"
 
         layout_thong_tin.addWidget(QLabel(f"• Model: {model} (InceptionResnetV1)"))
         layout_thong_tin.addWidget(QLabel(f"• Embedding: {emb_dim}D"))
         layout_thong_tin.addWidget(QLabel(f"• Device: {device}"))
 
-        # ✅ Hiển thị đường dẫn file config
         config_path = getattr(settings, 'TEP_THRESHOLD', 'data/threshold.json')
         layout_thong_tin.addWidget(QLabel(f"• Config: {config_path}"))
 
@@ -237,36 +216,22 @@ class SettingsPage(QWidget):
 
         bo_cuc.addStretch()
 
-    # ============================================================
-    # XỬ LÝ THAY ĐỔI
-    # ============================================================
-
     def on_nhan_dang_changed(self, value):
-        """Thay đổi threshold nhận dạng"""
         self.threshold_nhan_dang = value / 100.0
         self.label_nhan_dang.setText(f"{self.threshold_nhan_dang:.2f}")
 
     def on_xac_minh_changed(self, value):
-        """Thay đổi threshold xác minh"""
         self.threshold_xac_minh = value / 100.0
         self.label_xac_minh.setText(f"{self.threshold_xac_minh:.2f}")
 
-    # ============================================================
-    # LƯU CÀI ĐẶT - DÙNG HÀM TỪ CONFIG
-    # ============================================================
-
     def save_settings(self):
-        """Lưu cài đặt - GỌI HÀM TỪ CONFIG"""
-
         try:
-            # ✅ Lưu vào file thông qua hàm trong settings
             from app.config import settings
             settings.save_threshold(
                 nhan_dang=self.threshold_nhan_dang,
                 xac_minh=self.threshold_xac_minh
             )
 
-            # Phát signal lên main
             self.threshold_changed.emit(
                 self.threshold_nhan_dang,
                 self.threshold_xac_minh

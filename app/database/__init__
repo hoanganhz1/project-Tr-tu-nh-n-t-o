@@ -1,7 +1,4 @@
 # app/database/__init__.py
-# ================================================================
-# DATABASE PACKAGE
-# ================================================================
 
-from app.database.models import NguoiDung
 from app.database.repository import CoSoDuLieu
+from app.database.models import NguoiDung

@@ -1,7 +1,9 @@
-# app/utils/__init__.py
-from app.utils.logger import logger
-from app.utils.camera_manager import CameraManager
-from app.utils.worker import (
-    BaseWorker, WorkerSignals,
-    TrichXuatWorker, NhanDangWorker, XacMinhWorker, TrichXuatBatchWorker
-)
+# app/__init__.py
+# ================================================================
+# FACESECURE - PACKAGE INIT
+# ================================================================
+
+__version__ = "1.0.0"
+__author__ = "FaceSecure Team"
+
+from app.config import settings

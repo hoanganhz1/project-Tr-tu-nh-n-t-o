@@ -1,6 +1,6 @@
 # app/ui/database_page.py
 # ================================================================
-# QUẢN LÝ CƠ SỞ DỮ LIỆU - HOÀN CHỈNH
+# QUẢN LÝ CƠ SỞ DỮ LIỆU - HOÀN CHỈNH + REFRESH CACHE
 # ================================================================
 
 from PyQt5.QtWidgets import (
@@ -37,8 +37,6 @@ class DatabasePage(QWidget):
     # ============================================================
 
     def tao_giao_dien(self):
-        """Tạo giao diện"""
-
         bo_cuc = QVBoxLayout(self)
         bo_cuc.setContentsMargins(40, 35, 40, 35)
 
@@ -78,8 +76,6 @@ class DatabasePage(QWidget):
     # ============================================================
 
     def tai_du_lieu(self):
-        """Tải dữ liệu từ database"""
-
         try:
             danh_sach = self.database_api.get_all_users()
 
@@ -132,12 +128,10 @@ class DatabasePage(QWidget):
             QMessageBox.critical(self, "Lỗi", f"Không thể tải dữ liệu:\n{loi}")
 
     # ============================================================
-    # XÓA
+    # XÓA - CÓ REFRESH CACHE
     # ============================================================
 
     def xoa_nguoi(self, user_id):
-        """Xóa một người dùng"""
-
         tra_loi = QMessageBox.question(
             self,
             "Xác nhận",
@@ -150,6 +144,10 @@ class DatabasePage(QWidget):
 
         try:
             self.database_api.delete_user(user_id)
+            
+            # ✅ Refresh cache trong recognizer
+            self._refresh_recognizer_cache()
+            
             self.tai_du_lieu()
             logger.info(f"[Database] Đã xóa ID {user_id}")
 
@@ -158,8 +156,6 @@ class DatabasePage(QWidget):
             QMessageBox.critical(self, "Lỗi", f"Không thể xóa dữ liệu:\n{loi}")
 
     def xoa_tat_ca(self):
-        """Xóa tất cả người dùng"""
-
         tra_loi = QMessageBox.question(
             self,
             "Xác nhận",
@@ -176,9 +172,22 @@ class DatabasePage(QWidget):
                 user_id = nguoi.id if hasattr(nguoi, 'id') else nguoi.get('id')
                 self.database_api.delete_user(user_id)
 
+            # ✅ Refresh cache trong recognizer
+            self._refresh_recognizer_cache()
+            
             self.tai_du_lieu()
             logger.info("[Database] Đã xóa tất cả")
 
         except Exception as loi:
             logger.error(f"[Database] Lỗi xóa tất cả: {loi}")
             QMessageBox.critical(self, "Lỗi", f"Không thể xóa dữ liệu:\n{loi}")
+
+    def _refresh_recognizer_cache(self):
+        """Refresh cache của recognizer"""
+        try:
+            # Gọi callback từ database
+            if hasattr(self.database_api, 'database'):
+                self.database_api.database._notify_change()
+                logger.info("[Database] Đã gửi yêu cầu refresh cache")
+        except Exception as e:
+            logger.error(f"[Database] Lỗi refresh cache: {e}")

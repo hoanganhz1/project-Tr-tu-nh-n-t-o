@@ -19,7 +19,6 @@ def setup_logger(name="FaceSecure", log_level=logging.INFO):
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
     
-    # Tránh duplicate handlers
     if logger.handlers:
         return logger
     

@@ -1,6 +1,6 @@
 # app/ui/main_window.py
 # ================================================================
-# CỬA SỔ CHÍNH - QUẢN LÝ CAMERA 30FPS
+# CỬA SỔ CHÍNH - QUẢN LÝ CAMERA 60FPS
 # ================================================================
 
 from PyQt5.QtWidgets import (
@@ -21,11 +21,12 @@ from app.ui.database_page import DatabasePage
 from app.ui.settings_page import SettingsPage
 
 from app.utils.camera_manager import CameraManager
+from app.config.settings import CUDA_AVAILABLE, DEFAULT_FPS
 from app.utils.logger import logger
 
 
 class FaceSecureApp(QMainWindow):
-    """Cửa sổ chính - Quản lý camera 30fps"""
+    """Cửa sổ chính - Quản lý camera 60fps"""
 
     def __init__(self, face_api, database_api, detector, embedder, database):
         super().__init__()
@@ -46,7 +47,7 @@ class FaceSecureApp(QMainWindow):
 
         self.tao_giao_dien()
 
-        logger.info("[UI] MainWindow khởi tạo thành công!")
+        logger.info(f"[UI] MainWindow khởi tạo thành công! (FPS={DEFAULT_FPS})")
 
     def xu_ly_loi_camera(self, error):
         logger.error(f"[Camera] {error}")
@@ -128,7 +129,7 @@ class FaceSecureApp(QMainWindow):
         bo_cuc.addWidget(self.nut_cai_dat)
         bo_cuc.addStretch()
 
-        thong_tin = QLabel("FaceSecure v1.0\nFaceNet + MTCNN\nEmbedding 512D")
+        thong_tin = QLabel(f"FaceSecure v1.0\nFaceNet + MTCNN\n{'GPU' if CUDA_AVAILABLE else 'CPU'}")
         thong_tin.setAlignment(Qt.AlignCenter)
         thong_tin.setStyleSheet("QLabel { color: #94A3B8; font-size: 11px; }")
         bo_cuc.addWidget(thong_tin)
@@ -175,12 +176,7 @@ class FaceSecureApp(QMainWindow):
     def chuyen_trang(self, chi_so, nut_dang_chon):
         self.khu_vuc_noi_dung.setCurrentIndex(chi_so)
 
-        danh_sach_nut = [
-            self.nut_dang_ky,
-            self.nut_nhan_dang,
-            self.nut_quan_ly,
-            self.nut_cai_dat
-        ]
+        danh_sach_nut = [self.nut_dang_ky, self.nut_nhan_dang, self.nut_quan_ly, self.nut_cai_dat]
         for nut in danh_sach_nut:
             nut.setChecked(False)
         nut_dang_chon.setChecked(True)

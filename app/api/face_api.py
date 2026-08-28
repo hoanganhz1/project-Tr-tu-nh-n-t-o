@@ -1,6 +1,6 @@
 # app/api/face_api.py
 # ================================================================
-# FACE API - THÊM CHUẨN HÓA CHO XÁC MINH
+# FACE API - CHỈ HỖ TRỢ 1 KHUÔN MẶT
 # ================================================================
 
 from app.config.settings import NGUONG_NHAN_DANG, NGUONG_XAC_MINH
@@ -20,25 +20,18 @@ class FaceAPI:
         self.identification_service = identification_service
         self.verification_service = verification_service
 
-    # ============================================================
-    # REGISTER - GIỮ NGUYÊN
-    # ============================================================
-
     def register(self, thong_tin, danh_sach_embedding):
         return self.registration_service.tao_nguoi_dung(
             thong_tin,
             danh_sach_embedding
         )
 
-    # ============================================================
-    # IDENTIFY 1:N
-    # ============================================================
-
     def identify(
         self,
         anh_bgr,
         threshold=None
     ):
+        """Nhận dạng 1:N - CHỈ 1 KHUÔN MẶT"""
         if threshold is None:
             threshold = NGUONG_NHAN_DANG
 
@@ -46,10 +39,6 @@ class FaceAPI:
             anh_bgr,
             threshold=threshold
         )
-
-    # ============================================================
-    # ✅ VERIFY 1:1 - CÓ CHUẨN HÓA
-    # ============================================================
 
     def verify(
         self,
@@ -66,10 +55,6 @@ class FaceAPI:
             threshold=threshold
         )
 
-    # ============================================================
-    # ✅ VERIFY 1:1 - CÓ CHUẨN HÓA NÂNG CAO
-    # ============================================================
-
     def verify_normalized(
         self,
         anh_bgr,
@@ -77,15 +62,6 @@ class FaceAPI:
         threshold=None,
         use_advanced=True
     ):
-        """
-        Xác minh 1:1 với chuẩn hóa nâng cao
-        
-        Args:
-            anh_bgr: Ảnh BGR
-            user_id: ID cần xác minh
-            threshold: Ngưỡng
-            use_advanced: Có dùng chuẩn hóa nâng cao không
-        """
         if threshold is None:
             threshold = NGUONG_XAC_MINH
 

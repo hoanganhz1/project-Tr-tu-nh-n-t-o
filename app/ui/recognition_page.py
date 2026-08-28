@@ -1,11 +1,13 @@
 # app/ui/recognition_page.py
 # ================================================================
-# NHẬN DẠNG & XÁC MINH - ĐỒNG BỘ 30FPS, KHÔNG XUNG ĐỘT
+# NHẬN DẠNG & XÁC MINH - THÊM THÔNG BÁO GIỌNG NÓI
 # ================================================================
 
 import cv2
 import numpy as np
 import time
+import torch
+import os
 
 from PyQt5.QtWidgets import (
     QWidget,
@@ -31,48 +33,59 @@ from PyQt5.QtGui import QImage, QPixmap
 
 from app.config import settings
 from app.config.constants import DEFAULT_NHAN_DANG_THRESHOLD, DEFAULT_XAC_MINH_THRESHOLD
+from app.config.settings import CUDA_AVAILABLE, DEFAULT_FPS
 from app.utils.camera_manager import CameraManager
 from app.utils.worker import NhanDangWorker, XacMinhWorker
+from app.utils.tts_simple import speak  # ✅ THÊM IMPORT
 from app.utils.logger import logger
 
 
 class RecognitionPage(QWidget):
-    """Trang nhận dạng và xác minh - Đồng bộ 30FPS, không xung đột"""
+    """Trang nhận dạng - Có thông báo giọng nói"""
 
     def __init__(self, face_api):
         super().__init__()
 
         self.face_api = face_api
 
-        # Lấy detector và embedder từ face_api (dùng chung)
+        # Lấy detector từ face_api
         self.detector = face_api.identification_service.recognizer.embedder.detector
         self.embedder = face_api.identification_service.recognizer.embedder
-        self.matcher = face_api.identification_service.recognizer.matcher
+
+        # Lấy recognizer để refresh cache
+        self.recognizer = face_api.identification_service.recognizer
 
         # Camera Manager
         self.camera_manager = CameraManager()
         self.active = False
         self.camera_manager.frame_ready.connect(self.cap_nhat_camera)
 
-        # Buffer và mutex
+        # Buffer
         self.frame_buffer = None
         self.buffer_mutex = QMutex()
+
+        # Cấu hình tốc độ
+        self.has_gpu = CUDA_AVAILABLE
+        self.FPS_CAMERA = DEFAULT_FPS
+        self.DISPLAY_INTERVAL = 16 if self.has_gpu else 33
+        self.min_process_interval = 300
+
+        # Timer hiển thị
         self.display_timer = QTimer()
         self.display_timer.timeout.connect(self._update_display)
-        self.display_timer.start(33)  # ~30fps
+        self.display_timer.start(self.DISPLAY_INTERVAL)
+
+        # Timer xử lý nhận dạng
+        self.process_timer = QTimer()
+        self.process_timer.timeout.connect(self._process_identification)
+        self.process_timer.start(self.min_process_interval)
 
         # Trạng thái
-        self.anh_hien_tai = None
         self.dang_xu_ly = False
         self.tu_dong_quet = True
-        self.che_do_hien_tai = "1:N"   # "1:N" hoặc "1:1"
+        self.che_do_hien_tai = "1:N"
         self.cach_khop = "embedding"
-
-        # Tăng tốc: xử lý mỗi N frame
-        self.frame_counter = 0
-        self.PROCESS_EVERY_N_FRAMES = 2
         self.last_process_time = 0
-        self.min_process_interval = 66  # ~15 lần/giây
 
         # Threshold
         self.threshold_nhan_dang = getattr(settings, 'NGUONG_NHAN_DANG', DEFAULT_NHAN_DANG_THRESHOLD)
@@ -80,16 +93,111 @@ class RecognitionPage(QWidget):
 
         # ThreadPool
         self.threadpool = QThreadPool.globalInstance()
+        self.active_workers = []
+        self.worker_mutex = QMutex()
 
-        # Lưu kết quả cuối cùng để hiển thị
-        self.last_results = []
-        self.last_boxes = []
-        self.last_thong_tin = []
+        # Kết quả hiện tại
+        self.current_result = None
+        
+        # ✅ THÊM: Biến để tránh thông báo trùng lặp
+        self.last_notification = ""
+        self.last_notification_time = 0
+
+        # Load font Unicode
+        self._load_unicode_font()
 
         # Tạo giao diện
         self.tao_giao_dien()
 
-        logger.info("[Recognition] Đã khởi tạo (Đồng bộ 30FPS, không xung đột)")
+        logger.info(f"[Recognition] Đã khởi tạo (GPU={self.has_gpu}, FPS={self.FPS_CAMERA})")
+
+    # ============================================================
+    # SET ACTIVE - QUẢN LÝ TRANG
+    # ============================================================
+
+    def set_active(self, active: bool):
+        """✅ THÊM: Phương thức để bật/tắt trang"""
+        self.active = active
+        if active:
+            if not self.camera_manager.is_opened():
+                self.camera_manager.start(fps=self.FPS_CAMERA)
+            self.camera_manager.resume()
+            if not self.display_timer.isActive():
+                self.display_timer.start(self.DISPLAY_INTERVAL)
+            if not self.process_timer.isActive():
+                self.process_timer.start(self.min_process_interval)
+            self.hien_thi_camera.setText("📷 Camera")
+            logger.info(f"[Recognition] Active: BẬT ({self.FPS_CAMERA}fps)")
+        else:
+            logger.info("[Recognition] Active: TẮT")
+            self._cancel_all_workers()
+            self.camera_manager.pause()
+            self.hien_thi_camera.setText("⏸️ Camera tạm dừng")
+
+    def _cancel_all_workers(self):
+        """Hủy tất cả worker đang chạy"""
+        with QMutexLocker(self.worker_mutex):
+            for worker in self.active_workers:
+                try:
+                    if hasattr(worker, 'cancel'):
+                        worker.cancel()
+                except:
+                    pass
+            self.active_workers.clear()
+
+    # ============================================================
+    # LOAD FONT UNICODE
+    # ============================================================
+
+    def _load_unicode_font(self):
+        """Tải font Unicode để hiển thị tiếng Việt"""
+        self.font_path = None
+        font_paths = [
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+        for path in font_paths:
+            if os.path.exists(path):
+                self.font_path = path
+                logger.info(f"[Recognition] Đã tìm thấy font: {path}")
+                return
+        logger.warning("[Recognition] Không tìm thấy font Unicode")
+
+    def _draw_unicode_text(self, img, text, x, y, color, font_size=16):
+        """Vẽ text Unicode lên ảnh"""
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+            
+            img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(img_pil, "RGBA")
+            
+            if self.font_path and os.path.exists(self.font_path):
+                font = ImageFont.truetype(self.font_path, font_size)
+            else:
+                font = ImageFont.load_default()
+            
+            bbox = draw.textbbox((0, 0), text, font=font)
+            text_w = bbox[2] - bbox[0]
+            text_h = bbox[3] - bbox[1]
+            
+            padding = 8
+            draw.rectangle(
+                [x - padding, y - text_h - padding,
+                 x + text_w + padding, y + padding],
+                fill=(0, 0, 0, 200)
+            )
+            
+            color_rgb = (color[2], color[1], color[0])
+            draw.text((x, y - text_h), text, font=font, fill=color_rgb)
+            
+            img[:] = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+            return True
+        except Exception as e:
+            cv2.putText(img, text.encode('ascii', 'ignore').decode('ascii'),
+                       (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+            return False
 
     # ============================================================
     # GIAO DIỆN
@@ -205,7 +313,6 @@ class RecognitionPage(QWidget):
 
         bo_cuc.addLayout(header)
 
-        # Splitter
         splitter = QSplitter(Qt.Horizontal)
 
         khung_camera = QFrame()
@@ -354,26 +461,7 @@ class RecognitionPage(QWidget):
         self.nut_1_n.toggled.connect(self.thay_doi_che_do)
 
     # ============================================================
-    # QUẢN LÝ TRANG ACTIVE
-    # ============================================================
-
-    def set_active(self, active: bool):
-        self.active = active
-        if active:
-            if not self.camera_manager.is_opened():
-                self.camera_manager.start(fps=30)
-            self.camera_manager.resume()
-            if not self.display_timer.isActive():
-                self.display_timer.start(33)
-            self.hien_thi_camera.setText("📷 Camera")
-            logger.info("[Recognition] Active: BẬT (30fps)")
-        else:
-            logger.info("[Recognition] Active: TẮT")
-            self.camera_manager.pause()
-            self.hien_thi_camera.setText("⏸️ Camera tạm dừng")
-
-    # ============================================================
-    # XỬ LÝ FRAME TỪ CAMERA MANAGER
+    # NHẬN FRAME TỪ CAMERA
     # ============================================================
 
     def cap_nhat_camera(self, anh_bgr):
@@ -383,20 +471,194 @@ class RecognitionPage(QWidget):
         with QMutexLocker(self.buffer_mutex):
             self.frame_buffer = anh_bgr.copy()
 
-        # Chỉ xử lý nhận dạng tự động nếu đang ở chế độ 1:N và bật tự động quét
-        if self.tu_dong_quet and self.che_do_hien_tai == "1:N" and not self.dang_xu_ly:
-            self.frame_counter += 1
-            if self.frame_counter % self.PROCESS_EVERY_N_FRAMES == 0:
-                current_time = time.time() * 1000
-                if current_time - self.last_process_time >= self.min_process_interval:
-                    self.last_process_time = current_time
-                    with QMutexLocker(self.buffer_mutex):
-                        anh_xu_ly = self.frame_buffer.copy() if self.frame_buffer is not None else None
-                    if anh_xu_ly is not None:
-                        self.bat_dau_nhan_dang_tu_dong(anh_xu_ly)
+    # ============================================================
+    # XỬ LÝ NHẬN DẠNG
+    # ============================================================
+
+    def _process_identification(self):
+        if not self.active or not self.tu_dong_quet:
+            return
+        if self.che_do_hien_tai != "1:N":
+            return
+        if self.dang_xu_ly:
+            return
+
+        with QMutexLocker(self.buffer_mutex):
+            if self.frame_buffer is None:
+                return
+            anh = self.frame_buffer.copy()
+
+        if anh is None:
+            return
+
+        current_time = time.time() * 1000
+        if current_time - self.last_process_time < self.min_process_interval:
+            return
+        self.last_process_time = current_time
+
+        self.dang_xu_ly = True
+        start_time = time.time()
+
+        worker = NhanDangWorker(
+            face_api=self.face_api,
+            anh_bgr=anh,
+            threshold=self.threshold_nhan_dang
+        )
+        
+        with QMutexLocker(self.worker_mutex):
+            self.active_workers.append(worker)
+        
+        worker.signals.result.connect(
+            lambda ket_qua: self._on_nhan_dang_result(ket_qua, start_time)
+        )
+        worker.signals.error.connect(self._on_nhan_dang_error)
+        worker.signals.finished.connect(
+            lambda: self._on_worker_finished(worker)
+        )
+        self.threadpool.start(worker)
+
+    def _on_nhan_dang_result(self, ket_qua, start_time):
+        self.dang_xu_ly = False
+
+        process_time = (time.time() - start_time) * 1000
+        self._update_performance_label(process_time)
+
+        best_match = ket_qua.get("best_match")
+        if best_match:
+            user = best_match.get("user")
+            dist = best_match.get("distance")
+            
+            if user:
+                if hasattr(user, 'to_dict'):
+                    user_dict = user.to_dict()
+                else:
+                    user_dict = user
+                
+                if dist is not None and dist <= self.threshold_nhan_dang:
+                    name = user_dict.get("name", "Unknown")
+                    self.current_result = {
+                        "name": name,
+                        "distance": dist,
+                        "status": "success"
+                    }
+                    self.nhan_trang_thai.setText(f"{name}")
+                    self.nhan_trang_thai.setStyleSheet("""
+                        QLabel {
+                            color: #16A34A;
+                            font-size: 13px;
+                            padding: 5px 10px;
+                            background: rgba(22, 163, 74, 0.15);
+                            border-radius: 6px;
+                        }
+                    """)
+                    
+                    # ✅ THÊM: Thông báo bằng giọng nói
+                    self._speak_notification(f"nhận diện thành công {name}")
+                    
+                else:
+                    self.current_result = {
+                        "name": "Người lạ",
+                        "distance": dist,
+                        "status": "fail"
+                    }
+                    self.nhan_trang_thai.setText(f"❌ Người lạ - {dist:.3f}")
+                    self.nhan_trang_thai.setStyleSheet("""
+                        QLabel {
+                            color: #DC2626;
+                            font-size: 13px;
+                            padding: 5px 10px;
+                            background: rgba(220, 38, 38, 0.15);
+                            border-radius: 6px;
+                        }
+                    """)
+                    
+                    # ✅ THÊM: Thông báo người lạ
+                    self._speak_notification("Người lạ, không xác định")
+                    
+            else:
+                self.current_result = {
+                    "name": "Người lạ",
+                    "distance": None,
+                    "status": "fail"
+                }
+                self.nhan_trang_thai.setText("❌ Người lạ")
+                self.nhan_trang_thai.setStyleSheet("""
+                    QLabel {
+                        color: #DC2626;
+                        font-size: 13px;
+                        padding: 5px 10px;
+                        background: rgba(220, 38, 38, 0.15);
+                        border-radius: 6px;
+                    }
+                """)
+                self._speak_notification("Người lạ, không xác định")
+        else:
+            self.current_result = {
+                "name": "Không xác định",
+                "distance": None,
+                "status": "unknown"
+            }
+            self.nhan_trang_thai.setText("ℹ️ Không nhận dạng được")
+            self.nhan_trang_thai.setStyleSheet("""
+                QLabel {
+                    color: #94A3B8;
+                    font-size: 13px;
+                    padding: 5px 10px;
+                    background: rgba(255,255,255,0.05);
+                    border-radius: 6px;
+                }
+            """)
+
+        try:
+            self.recognizer._get_all_users()
+        except Exception as e:
+            logger.debug(f"[Recognition] Refresh cache: {e}")
+
+    def _on_nhan_dang_error(self, error):
+        self.dang_xu_ly = False
+        logger.error(f"[Recognition] Lỗi nhận dạng: {error}")
+
+    def _on_worker_finished(self, worker):
+        with QMutexLocker(self.worker_mutex):
+            if worker in self.active_workers:
+                self.active_workers.remove(worker)
+
+    def _update_performance_label(self, process_time):
+        self.label_performance.setText(f"⚡ {process_time:.0f}ms")
+        if process_time < 30:
+            self.label_performance.setStyleSheet("color: #16A34A; font-size: 12px; font-weight: bold;")
+        elif process_time < 80:
+            self.label_performance.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: bold;")
+        else:
+            self.label_performance.setStyleSheet("color: #DC2626; font-size: 12px; font-weight: bold;")
 
     # ============================================================
-    # HIỂN THỊ (GỌI BỞI TIMER)
+    # THÔNG BÁO GIỌNG NÓI
+    # ============================================================
+
+    def _speak_notification(self, text):
+        """
+        Phát thông báo bằng giọng nói
+        Tránh thông báo trùng lặp trong 3 giây
+        """
+        current_time = time.time()
+        
+        # Tránh thông báo trùng lặp trong 3 giây
+        if text == self.last_notification and (current_time - self.last_notification_time) < 3:
+            return
+        
+        self.last_notification = text
+        self.last_notification_time = current_time
+        
+        # Phát âm thanh
+        try:
+            speak(text, voice="vi-VN")
+            logger.info(f"[Recognition] Đã phát giọng nói: {text}")
+        except Exception as e:
+            logger.error(f"[Recognition] Lỗi phát giọng nói: {e}")
+
+    # ============================================================
+    # HIỂN THỊ
     # ============================================================
 
     def _update_display(self):
@@ -408,260 +670,64 @@ class RecognitionPage(QWidget):
                 return
             anh = self.frame_buffer.copy()
 
-        # Nếu đang ở chế độ 1:1, chỉ hiển thị khung cơ bản (không vẽ kết quả nhận dạng)
-        if self.che_do_hien_tai == "1:1":
-            # Vẽ khung MTCNN đơn giản
-            box, _ = self.detector.phat_hien(anh)
-            if box is not None:
-                cv2.rectangle(anh, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 2)
-                self.nhan_so_face.setText("👤 1 khuôn mặt")
-            else:
-                self.nhan_so_face.setText("👤 0 khuôn mặt")
-        else:
-            # Chế độ 1:N: vẽ kết quả nhận dạng nếu có
-            if self.last_results and self.last_boxes:
-                anh = self.detector.ve_khung_cho_nhieu_face(anh, self.last_boxes, self.last_thong_tin)
-            else:
-                # Nếu chưa có kết quả, vẽ khung MTCNN cơ bản
-                box, _ = self.detector.phat_hien(anh)
-                if box is not None:
-                    cv2.rectangle(anh, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 2)
-                    self.nhan_so_face.setText("👤 1 khuôn mặt")
+        if anh is None:
+            return
+
+        # Phát hiện 1 khuôn mặt lớn nhất
+        box, _ = self.detector.phat_hien_nhanh(anh, scale=0.5)
+        
+        if box is not None:
+            self.nhan_so_face.setText("👤 1 khuôn mặt")
+            
+            if self.current_result:
+                info = self.current_result
+                status = info.get("status", "unknown")
+                
+                if status == "success":
+                    color = (0, 255, 0)
+                    name = info.get("name", "Unknown")
+                    dist = info.get("distance")
+                    label = f"✅ {name}" + (f" - {dist:.3f}" if dist else "")
+                elif status == "fail":
+                    color = (0, 0, 255)
+                    name = info.get("name", "Người lạ")
+                    dist = info.get("distance")
+                    label = f"❌ {name}" + (f" - {dist:.3f}" if dist else "")
                 else:
-                    self.nhan_so_face.setText("👤 0 khuôn mặt")
+                    color = (0, 255, 255)
+                    label = "🔄 Đang nhận dạng..."
+                
+                x1, y1, x2, y2 = box
+                cv2.rectangle(anh, (x1, y1), (x2, y2), color, 2)
+                self._draw_unicode_text(anh, label, x1, y1 - 10, color, font_size=16)
+        else:
+            self.nhan_so_face.setText("👤 0 khuôn mặt")
+            self.current_result = None
 
         self._hien_thi_anh(anh)
 
     def _hien_thi_anh(self, anh_bgr):
         if anh_bgr is None:
             return
-        anh_rgb = cv2.cvtColor(anh_bgr, cv2.COLOR_BGR2RGB)
-        cao, rong, kenh = anh_rgb.shape
-        anh_qt = QImage(anh_rgb.data, rong, cao, kenh * rong, QImage.Format_RGB888)
-        self.hien_thi_camera.setPixmap(
-            QPixmap.fromImage(anh_qt).scaled(
-                self.hien_thi_camera.size(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
+        try:
+            anh_rgb = cv2.cvtColor(anh_bgr, cv2.COLOR_BGR2RGB)
+            cao, rong, kenh = anh_rgb.shape
+            anh_qt = QImage(anh_rgb.data, rong, cao, kenh * rong, QImage.Format_RGB888)
+            self.hien_thi_camera.setPixmap(
+                QPixmap.fromImage(anh_qt).scaled(
+                    self.hien_thi_camera.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
             )
-        )
+        except Exception as e:
+            logger.error(f"[Recognition] Lỗi hiển thị: {e}")
 
     # ============================================================
-    # NHẬN DẠNG TỰ ĐỘNG (DÙNG WORKER)
-    # ============================================================
-
-    def bat_dau_nhan_dang_tu_dong(self, anh_bgr):
-        if anh_bgr is None or self.dang_xu_ly or self.che_do_hien_tai != "1:N":
-            return
-
-        self.dang_xu_ly = True
-        worker = NhanDangWorker(
-            face_api=self.face_api,
-            anh_bgr=anh_bgr,
-            threshold=self.threshold_nhan_dang
-        )
-        worker.signals.result.connect(self.nhan_ket_qua_nhan_dang)
-        worker.signals.error.connect(self.xu_ly_loi_nhan_dang)
-        worker.signals.finished.connect(self.ket_thuc_nhan_dang)
-        self.threadpool.start(worker)
-
-    def nhan_ket_qua_nhan_dang(self, ket_qua):
-        self.dang_xu_ly = False
-
-        process_time = ket_qua.get("processing_time_ms", 0)
-        if process_time > 0:
-            self.label_performance.setText(f"⚡ {process_time:.0f}ms")
-            if process_time < 50:
-                self.label_performance.setStyleSheet("color: #16A34A; font-size: 12px; font-weight: bold;")
-            elif process_time < 150:
-                self.label_performance.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: bold;")
-            else:
-                self.label_performance.setStyleSheet("color: #DC2626; font-size: 12px; font-weight: bold;")
-
-        if ket_qua.get("success", False):
-            self.nhan_trang_thai.setText(f"✅ {ket_qua.get('message', 'Thành công')}")
-            self.nhan_trang_thai.setStyleSheet("""
-                QLabel {
-                    color: #16A34A;
-                    font-size: 13px;
-                    padding: 5px 10px;
-                    background: rgba(22, 163, 74, 0.15);
-                    border-radius: 6px;
-                }
-            """)
-        else:
-            self.nhan_trang_thai.setText(f"❌ {ket_qua.get('message', 'Thất bại')}")
-            self.nhan_trang_thai.setStyleSheet("""
-                QLabel {
-                    color: #DC2626;
-                    font-size: 13px;
-                    padding: 5px 10px;
-                    background: rgba(220, 38, 38, 0.15);
-                    border-radius: 6px;
-                }
-            """)
-
-        # Lưu kết quả để hiển thị (chỉ khi ở chế độ 1:N)
-        if self.che_do_hien_tai == "1:N":
-            self.last_results = ket_qua.get("results", [])
-            with QMutexLocker(self.buffer_mutex):
-                if self.frame_buffer is not None:
-                    anh = self.frame_buffer.copy()
-                else:
-                    anh = None
-            if anh is not None:
-                self.last_boxes, _ = self.detector.phat_hien_tat_ca(anh)
-                self.last_thong_tin = self.khop_nhieu_face(anh, self.last_boxes, self.last_results)
-
-    def xu_ly_loi_nhan_dang(self, error):
-        self.dang_xu_ly = False
-        logger.error(f"[Recognition] Lỗi nhận dạng: {error}")
-
-    def ket_thuc_nhan_dang(self):
-        pass
-
-    # ============================================================
-    # KHỚP NHIỀU KHUÔN MẶT
-    # ============================================================
-
-    def khop_nhieu_face(self, anh_bgr, boxes, results):
-        if not boxes or not results:
-            return []
-
-        # Xây dựng map user từ results
-        user_map = {}
-        for item in results:
-            if isinstance(item, dict):
-                user = item.get("user")
-                dist = item.get("distance")
-                if user:
-                    if hasattr(user, 'to_dict'):
-                        user_dict = user.to_dict()
-                    else:
-                        user_dict = user
-                    user_id = user_dict.get("id")
-                    user_map[user_id] = {
-                        "name": user_dict.get("name", "Unknown"),
-                        "distance": dist,
-                        "status": "success" if dist is not None and dist <= self.threshold_nhan_dang else "fail",
-                        "user": user
-                    }
-
-        # Cắt các ROI
-        list_roi = []
-        for box in boxes:
-            x1, y1, x2, y2 = box
-            face_roi = anh_bgr[y1:y2, x1:x2]
-            if face_roi.size == 0:
-                list_roi.append(None)
-            else:
-                list_roi.append(face_roi)
-
-        # Lọc None
-        valid_indices = [i for i, roi in enumerate(list_roi) if roi is not None]
-        valid_rois = [list_roi[i] for i in valid_indices]
-
-        if not valid_rois:
-            return [{"name": "Không xác định", "distance": None, "status": "fail"} for _ in boxes]
-
-        # Batch extract embeddings
-        embeddings = [None] * len(list_roi)
-        batch_embs = self.embedder.trich_xuat_batch(valid_rois, use_advanced=True)
-        for idx, emb in zip(valid_indices, batch_embs):
-            embeddings[idx] = emb
-
-        # Xử lý từng face
-        thong_tin_list = []
-        from app.database.repository import CoSoDuLieu
-
-        for i, (box, embedding) in enumerate(zip(boxes, embeddings)):
-            info = {"name": "Không xác định", "distance": None, "status": "fail"}
-
-            if embedding is None:
-                thong_tin_list.append(info)
-                continue
-
-            if self.cach_khop == "position":
-                if i < len(results):
-                    item = results[i]
-                    if isinstance(item, dict):
-                        user = item.get("user")
-                        dist = item.get("distance")
-                        if user:
-                            if hasattr(user, 'to_dict'):
-                                user_dict = user.to_dict()
-                            else:
-                                user_dict = user
-                            info["name"] = user_dict.get("name", "Unknown")
-                            info["distance"] = dist
-                            info["status"] = "success" if dist is not None and dist <= self.threshold_nhan_dang else "fail"
-
-            elif self.cach_khop == "id":
-                best_match = None
-                best_distance = float('inf')
-                for item in results:
-                    if not isinstance(item, dict):
-                        continue
-                    user = item.get("user")
-                    dist = item.get("distance")
-                    if user is None or dist is None:
-                        continue
-                    if hasattr(user, 'embedding'):
-                        user_embedding = user.embedding
-                    elif isinstance(user, dict) and 'embedding' in user:
-                        user_embedding = user['embedding']
-                    else:
-                        continue
-                    actual_distance = self.matcher.tinh_cosine_distance(embedding, user_embedding)
-                    if actual_distance < best_distance:
-                        best_distance = actual_distance
-                        best_match = item
-                if best_match is not None:
-                    user = best_match.get("user")
-                    if user:
-                        if hasattr(user, 'to_dict'):
-                            user_dict = user.to_dict()
-                        else:
-                            user_dict = user
-                        info["name"] = user_dict.get("name", "Unknown")
-                        info["distance"] = best_distance
-                        info["status"] = "success" if best_distance <= self.threshold_nhan_dang else "fail"
-
-            else:  # embedding
-                db = CoSoDuLieu()
-                all_users = db.lay_tat_ca_nguoi()
-                best_match = None
-                best_distance = float('inf')
-                for user in all_users:
-                    if hasattr(user, 'embedding'):
-                        user_embedding = user.embedding
-                    elif isinstance(user, dict) and 'embedding' in user:
-                        user_embedding = user['embedding']
-                    else:
-                        continue
-                    actual_distance = self.matcher.tinh_cosine_distance(embedding, user_embedding)
-                    if actual_distance < best_distance:
-                        best_distance = actual_distance
-                        best_match = user
-                if best_match is not None:
-                    if hasattr(best_match, 'to_dict'):
-                        user_dict = best_match.to_dict()
-                    else:
-                        user_dict = best_match
-                    info["name"] = user_dict.get("name", "Unknown")
-                    info["distance"] = best_distance
-                    info["status"] = "success" if best_distance <= self.threshold_nhan_dang else "fail"
-
-            thong_tin_list.append(info)
-
-        return thong_tin_list
-
-    # ============================================================
-    # XÁC MINH 1:1 (DÙNG THREADPOOL)
+    # XÁC MINH 1:1
     # ============================================================
 
     def bat_dau_xac_minh_thu_cong(self):
-        """Bắt đầu xác minh 1:1 thủ công - Tạm dừng nhận dạng tự động"""
         if self.che_do_hien_tai != "1:1":
             return
 
@@ -677,7 +743,6 @@ class RecognitionPage(QWidget):
             self.o_id_xac_minh.setFocus()
             return
 
-        # Ngăn không cho nhận dạng tự động chạy trong khi xác minh
         self.dang_xu_ly = True
         self.nut_bat_dau.setEnabled(False)
         self.nhan_trang_thai.setText(f"🔄 Đang xác minh ID {user_id}...")
@@ -700,37 +765,14 @@ class RecognitionPage(QWidget):
             threshold=self.threshold_xac_minh,
             use_normalize=True
         )
-        worker.signals.result.connect(self.nhan_ket_qua_xac_minh)
-        worker.signals.error.connect(self.xu_ly_loi_xac_minh)
-        worker.signals.finished.connect(self.ket_thuc_xac_minh)
+        worker.signals.result.connect(self._on_xac_minh_result)
+        worker.signals.error.connect(self._on_xac_minh_error)
+        worker.signals.finished.connect(self._on_xac_minh_finished)
         self.threadpool.start(worker)
 
-    def nhan_ket_qua_xac_minh(self, ket_qua):
+    def _on_xac_minh_result(self, ket_qua):
         self.dang_xu_ly = False
         self.nut_bat_dau.setEnabled(True)
-
-        # Cập nhật hiển thị
-        with QMutexLocker(self.buffer_mutex):
-            if self.frame_buffer is not None:
-                anh = self.frame_buffer.copy()
-            else:
-                anh = None
-
-        if anh is not None:
-            box, _ = self.detector.phat_hien(anh)
-            if box is not None:
-                best_match = ket_qua.get("best_match", {})
-                user_info = best_match.get("user") if best_match else None
-                distance = best_match.get("distance") if best_match else None
-                ten = user_info.to_dict().get("name") if user_info and hasattr(user_info, 'to_dict') else None
-                anh = self.detector.ve_khung_va_thong_tin(
-                    anh, box,
-                    ten_nguoi=ten,
-                    distance=distance,
-                    threshold=self.threshold_xac_minh,
-                    trang_thai="success" if ket_qua.get("success") else "fail"
-                )
-            self._hien_thi_anh(anh)
 
         thanh_cong = ket_qua.get("success", False)
         message = ket_qua.get("message", "")
@@ -748,6 +790,20 @@ class RecognitionPage(QWidget):
                 }
             """)
             self.nhan_trang_thai.setText(f"✅ {message}")
+            
+            # ✅ THÊM: Thông báo xác minh thành công
+            best_match = ket_qua.get("best_match", {})
+            user_info = best_match.get("user") if best_match else None
+            if user_info:
+                if hasattr(user_info, 'to_dict'):
+                    user_dict = user_info.to_dict()
+                else:
+                    user_dict = user_info
+                name = user_dict.get("name", "Người dùng")
+                self._speak_notification(f"Xác minh thành công,{name}")
+            else:
+                self._speak_notification("Xác minh thành công")
+                
         else:
             self.nhan_trang_thai_ket_qua.setText(f"❌ {message}")
             self.nhan_trang_thai_ket_qua.setStyleSheet("""
@@ -761,6 +817,9 @@ class RecognitionPage(QWidget):
                 }
             """)
             self.nhan_trang_thai.setText(f"❌ {message}")
+            
+            # ✅ THÊM: Thông báo xác minh thất bại
+            self._speak_notification("Xác minh thất bại")
 
         # Cập nhật chi tiết
         best_match = ket_qua.get("best_match", {})
@@ -825,7 +884,7 @@ class RecognitionPage(QWidget):
                     self.bang_so_sanh_ket_qua.setItem(row, 1, QTableWidgetItem(user_dict.get("name", "-")))
                     self.bang_so_sanh_ket_qua.setItem(row, 2, QTableWidgetItem(f"{dist:.4f}"))
 
-    def xu_ly_loi_xac_minh(self, error):
+    def _on_xac_minh_error(self, error):
         self.dang_xu_ly = False
         self.nut_bat_dau.setEnabled(True)
         logger.error(f"[Recognition] Lỗi xác minh: {error}")
@@ -842,23 +901,19 @@ class RecognitionPage(QWidget):
             }
         """)
 
-    def ket_thuc_xac_minh(self):
+    def _on_xac_minh_finished(self):
         self.nut_bat_dau.setEnabled(True)
 
     # ============================================================
-    # CÁC HÀM HỖ TRỢ KHÁC
+    # CÁC HÀM HỖ TRỢ
     # ============================================================
 
     def thay_doi_che_do(self):
         is_1_1 = self.nut_1_1.isChecked()
         self.che_do_hien_tai = "1:1" if is_1_1 else "1:N"
 
-        # Khi chuyển sang 1:1, xóa kết quả nhận dạng cũ để tránh hiển thị nhầm
         if is_1_1:
-            self.last_results = []
-            self.last_boxes = []
-            self.last_thong_tin = []
-            # Tạm dừng tự động quét (nhận dạng) để tránh xung đột
+            self.current_result = None
             self.tu_dong_quet = False
             self.check_tu_dong.setChecked(False)
             self.panel_ket_qua.show()
@@ -877,7 +932,6 @@ class RecognitionPage(QWidget):
             """)
             self.nhan_trang_thai.setText("⏸️ Tạm dừng nhận dạng (đang xác minh)")
         else:
-            # Chuyển về 1:N: khôi phục tự động quét nếu checkbox đang bật
             if self.check_tu_dong.isChecked():
                 self.tu_dong_quet = True
             self.panel_ket_qua.hide()
@@ -885,20 +939,6 @@ class RecognitionPage(QWidget):
             self.o_id_xac_minh.setEnabled(False)
 
         self.lam_moi()
-
-    def hien_thi_khung_xac_minh(self):
-        """Hiển thị khung xác minh (1:1 mode)"""
-        with QMutexLocker(self.buffer_mutex):
-            if self.frame_buffer is None:
-                return
-            anh = self.frame_buffer.copy()
-        box, _ = self.detector.phat_hien(anh)
-        if box is not None:
-            cv2.rectangle(anh, (box[0], box[1]), (box[2], box[3]), (0, 255, 0), 2)
-            self.nhan_so_face.setText("👤 1 khuôn mặt")
-        else:
-            self.nhan_so_face.setText("👤 0 khuôn mặt")
-        self._hien_thi_anh(anh)
 
     def toggle_tu_dong_quet(self, checked):
         self.tu_dong_quet = checked
@@ -917,9 +957,23 @@ class RecognitionPage(QWidget):
     def bat_dau_xu_ly_thu_cong(self):
         if self.che_do_hien_tai == "1:N":
             with QMutexLocker(self.buffer_mutex):
-                anh = self.frame_buffer.copy() if self.frame_buffer is not None else None
+                if self.frame_buffer is None:
+                    QMessageBox.warning(self, "Chưa có ảnh", "Vui lòng đợi camera.")
+                    return
+                anh = self.frame_buffer.copy()
             if anh is not None:
-                self.bat_dau_nhan_dang_tu_dong(anh)
+                self.dang_xu_ly = True
+                start_time = time.time()
+                worker = NhanDangWorker(
+                    face_api=self.face_api,
+                    anh_bgr=anh,
+                    threshold=self.threshold_nhan_dang
+                )
+                worker.signals.result.connect(
+                    lambda ket_qua: self._on_nhan_dang_result(ket_qua, start_time)
+                )
+                worker.signals.error.connect(self._on_nhan_dang_error)
+                self.threadpool.start(worker)
         else:
             self.bat_dau_xac_minh_thu_cong()
 
@@ -940,33 +994,39 @@ class RecognitionPage(QWidget):
             }
         """)
         self.nhan_so_face.setText("👤 0 khuôn mặt")
-        self.nhan_trang_thai_ket_qua.setText("⏳ Chưa xác minh")
-        self.nhan_trang_thai_ket_qua.setStyleSheet("""
-            QLabel {
-                font-size: 16px;
-                font-weight: bold;
-                padding: 10px;
-                background: #F1F5F9;
-                border-radius: 8px;
-                color: #475569;
-            }
-        """)
-        self.nhan_ten_ket_qua.setText("👤 Tên: ---")
-        self.nhan_ten_ket_qua.setStyleSheet("font-size: 15px; font-weight: bold; color: #64748B;")
-        self.nhan_lop_ket_qua.setText("📚 Lớp: ---")
-        self.nhan_nganh_ket_qua.setText("🎓 Ngành: ---")
-        self.nhan_id_ket_qua.setText("🆔 ID: ---")
-        self.nhan_distance_ket_qua.setText("---")
-        self.nhan_distance_ket_qua.setStyleSheet("font-size: 18px; font-weight: bold; color: #94A3B8;")
-        self.nhan_similarity_ket_qua.setText("---")
-        self.nhan_similarity_ket_qua.setStyleSheet("font-size: 18px; font-weight: bold; color: #94A3B8;")
-        self.bang_so_sanh_ket_qua.setRowCount(0)
+        
+        if self.che_do_hien_tai == "1:1":
+            self.nhan_trang_thai_ket_qua.setText("⏳ Chưa xác minh")
+            self.nhan_trang_thai_ket_qua.setStyleSheet("""
+                QLabel {
+                    font-size: 16px;
+                    font-weight: bold;
+                    padding: 10px;
+                    background: #F1F5F9;
+                    border-radius: 8px;
+                    color: #475569;
+                }
+            """)
+            self.nhan_ten_ket_qua.setText("👤 Tên: ---")
+            self.nhan_ten_ket_qua.setStyleSheet("font-size: 15px; font-weight: bold; color: #64748B;")
+            self.nhan_lop_ket_qua.setText("📚 Lớp: ---")
+            self.nhan_nganh_ket_qua.setText("🎓 Ngành: ---")
+            self.nhan_id_ket_qua.setText("🆔 ID: ---")
+            self.nhan_distance_ket_qua.setText("---")
+            self.nhan_distance_ket_qua.setStyleSheet("font-size: 18px; font-weight: bold; color: #94A3B8;")
+            self.nhan_similarity_ket_qua.setText("---")
+            self.nhan_similarity_ket_qua.setStyleSheet("font-size: 18px; font-weight: bold; color: #94A3B8;")
+            self.bang_so_sanh_ket_qua.setRowCount(0)
+        
         self.label_performance.setText("⚡ 0ms")
         self.label_performance.setStyleSheet("color: #64748B; font-size: 12px; font-weight: bold;")
-        self.last_results = []
-        self.last_boxes = []
-        self.last_thong_tin = []
+        self.current_result = None
+        
+        # Reset thông báo giọng nói
+        self.last_notification = ""
+        self.last_notification_time = 0
 
     def closeEvent(self, su_kien):
         self.active = False
+        self._cancel_all_workers()
         su_kien.accept()

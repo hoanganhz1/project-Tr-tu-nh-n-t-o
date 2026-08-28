@@ -1,8 +1,16 @@
 # app/services/__init__.py
-# ================================================================
-# SERVICES PACKAGE
-# ================================================================
 
 from app.services.registration import DichVuDangKy
 from app.services.identification import DichVuNhanDang
 from app.services.verification import DichVuXacMinh
+# Trong __init__ của các service:
+
+from app.utils.face_processor import FaceProcessor
+
+class DichVuNhanDang:
+    def __init__(self, recognizer):
+        self.recognizer = recognizer
+        self.processor = FaceProcessor(
+            detector=recognizer.embedder.detector,
+            embedder=recognizer.embedder
+        )

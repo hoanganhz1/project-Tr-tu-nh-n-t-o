@@ -7,14 +7,10 @@
 # THRESHOLD
 # ============================================================
 
-# Mặc định
 DEFAULT_COSINE_THRESHOLD = 0.35
-
-# Giới hạn
 MIN_COSINE_THRESHOLD = 0.10
 MAX_COSINE_THRESHOLD = 0.80
 
-# ✅ Threshold riêng cho từng chức năng
 DEFAULT_NHAN_DANG_THRESHOLD = 0.35
 DEFAULT_XAC_MINH_THRESHOLD = 0.30
 
@@ -67,8 +63,8 @@ CAMERA_DISPLAY_HEIGHT = 480
 # MÀU SẮC KHUNG
 # ============================================================
 
-COLOR_SUCCESS = (0, 255, 0)      # Xanh - Nhận dạng thành công
-COLOR_FAIL = (0, 0, 255)         # Đỏ - Không nhận dạng được
-COLOR_DETECT = (0, 255, 255)     # Vàng - Đang phát hiện
-COLOR_TEXT = (255, 255, 255)     # Trắng
-COLOR_BG = (0, 0, 0, 128)        # Nền đen trong suốt
+COLOR_SUCCESS = (0, 255, 0)
+COLOR_FAIL = (0, 0, 255)
+COLOR_DETECT = (0, 255, 255)
+COLOR_TEXT = (255, 255, 255)
+COLOR_BG = (0, 0, 0, 128)
