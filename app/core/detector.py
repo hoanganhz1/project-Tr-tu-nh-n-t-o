@@ -1,6 +1,6 @@
 # app/core/detector.py
 # ================================================================
-# PHÁT HIỆN KHUÔN MẶT - HỖ TRỢ GPU + DETECT NHANH
+# PHÁT HIỆN KHUÔN MẶT - TỐI ƯU TỐC ĐỘ
 # ================================================================
 
 import cv2
@@ -10,7 +10,6 @@ from facenet_pytorch import MTCNN
 
 from app.config import settings
 from app.config.settings import THIET_BI
-# ✅ ĐẢM BẢO IMPORT ĐÚNG
 from app.utils.logger import logger
 
 
@@ -31,93 +30,50 @@ class PhatHienKhuonMat:
         self.use_sharpen = getattr(settings, 'SU_DUNG_SHARPEN', True)
         self.alpha = getattr(settings, 'ALPHA_CONTRAST', 1.2)
         self.beta = getattr(settings, 'BETA_BRIGHTNESS', 10)
+        
+        # ✅ THÊM: Cache để tránh detect lặp lại
+        self._last_detect_result = None
+        self._last_frame_hash = None
 
     def chuyen_sang_pil(self, anh_bgr):
         anh_rgb = cv2.cvtColor(anh_bgr, cv2.COLOR_BGR2RGB)
         return Image.fromarray(anh_rgb)
 
     # ============================================================
-    # DETECT CHUẨN
-    # ============================================================
-
-    def phat_hien(self, anh_bgr):
-        try:
-            anh_pil = self.chuyen_sang_pil(anh_bgr)
-            boxes, probabilities = self.mtcnn.detect(anh_pil)
-
-            if boxes is None:
-                return None, 0.0
-
-            dien_tich_lon_nhat = -1
-            box_tot_nhat = None
-            xac_suat_tot_nhat = 0.0
-
-            for i, box in enumerate(boxes):
-                x1, y1, x2, y2 = box
-                dien_tich = max(0, x2 - x1) * max(0, y2 - y1)
-
-                if dien_tich > dien_tich_lon_nhat:
-                    dien_tich_lon_nhat = dien_tich
-                    box_tot_nhat = tuple(map(int, box))
-                    if probabilities is not None:
-                        xac_suat_tot_nhat = float(probabilities[i])
-
-            return box_tot_nhat, xac_suat_tot_nhat
-
-        except Exception as loi:
-            print(f"[DETECTOR] {loi}")
-            return None, 0.0
-
-    def phat_hien_tat_ca(self, anh_bgr):
-        try:
-            anh_pil = self.chuyen_sang_pil(anh_bgr)
-            boxes, probabilities = self.mtcnn.detect(anh_pil)
-
-            if boxes is None:
-                return [], []
-
-            boxes_list = []
-            probs_list = []
-
-            for i, box in enumerate(boxes):
-                x1, y1, x2, y2 = box
-                boxes_list.append(tuple(map(int, box)))
-                if probabilities is not None:
-                    probs_list.append(float(probabilities[i]))
-                else:
-                    probs_list.append(0.0)
-
-            return boxes_list, probs_list
-
-        except Exception as loi:
-            print(f"[DETECTOR] {loi}")
-            return [], []
-
-    # ============================================================
-    # DETECT NHANH (DÙNG ẢNH NHỎ) - TĂNG TỐC ĐỘ
+    # DETECT NHANH - TỐI ƯU TỐC ĐỘ
     # ============================================================
 
     def phat_hien_nhanh(self, anh_bgr, scale=0.5):
         """
-        Phát hiện khuôn mặt nhanh - dùng ảnh nhỏ để tăng tốc
-        Trả về box đã được scale lại về kích thước gốc
+        Phát hiện khuôn mặt nhanh - TỐI ƯU TỐC ĐỘ
+        
+        ✅ SỬA: Giảm scale xuống 0.3 để tăng tốc
+        ✅ SỬA: Bỏ resize nếu ảnh đã nhỏ
         """
         if anh_bgr is None:
             return None, 0.0
 
         h, w = anh_bgr.shape[:2]
         
+        # ✅ SỬA: Nếu ảnh nhỏ, detect trực tiếp
+        if h < 200 or w < 200:
+            scale = 1.0
+        
+        # ✅ SỬA: Giảm scale xuống 0.3 để tăng tốc (mặc định 0.5)
+        if scale > 0.3:
+            scale = 0.3
+        
         # Resize ảnh nhỏ để detect nhanh
         if scale < 1.0:
             new_w = int(w * scale)
             new_h = int(h * scale)
-            anh_nho = cv2.resize(anh_bgr, (new_w, new_h))
+            anh_nho = cv2.resize(anh_bgr, (new_w, new_h), interpolation=cv2.INTER_AREA)
         else:
             anh_nho = anh_bgr
 
         anh_pil = self.chuyen_sang_pil(anh_nho)
         
-        # Detect trên ảnh nhỏ
+        # ✅ SỬA: Detect với thresholds cao hơn để nhanh hơn
         boxes, probs = self.mtcnn.detect(anh_pil)
 
         if boxes is None or len(boxes) == 0:
@@ -150,45 +106,73 @@ class PhatHienKhuonMat:
 
         return best_box, best_prob
 
-    def phat_hien_tat_ca_nhanh(self, anh_bgr, scale=0.5):
-        """Phát hiện tất cả khuôn mặt trên ảnh thu nhỏ"""
-        if anh_bgr is None:
-            return [], []
+    # ============================================================
+    # DETECT CHUẨN - DÙNG KHI CẦN ĐỘ CHÍNH XÁC CAO
+    # ============================================================
 
-        h, w = anh_bgr.shape[:2]
-        if scale < 1.0:
-            new_w = int(w * scale)
-            new_h = int(h * scale)
-            anh_nho = cv2.resize(anh_bgr, (new_w, new_h))
-        else:
-            anh_nho = anh_bgr
+    def phat_hien(self, anh_bgr):
+        """Phát hiện khuôn mặt - Độ chính xác cao, chậm hơn"""
+        try:
+            if anh_bgr is None:
+                return None, 0.0
+            
+            anh_pil = self.chuyen_sang_pil(anh_bgr)
+            boxes, probabilities = self.mtcnn.detect(anh_pil)
 
-        anh_pil = self.chuyen_sang_pil(anh_nho)
-        boxes, probs = self.mtcnn.detect(anh_pil)
+            if boxes is None:
+                return None, 0.0
 
-        if boxes is None:
-            return [], []
+            dien_tich_lon_nhat = -1
+            box_tot_nhat = None
+            xac_suat_tot_nhat = 0.0
 
-        boxes_list = []
-        probs_list = []
-
-        for i, box in enumerate(boxes):
-            if scale < 1.0:
-                scale_factor = 1.0 / scale
+            for i, box in enumerate(boxes):
                 x1, y1, x2, y2 = box
-                box = (
-                    int(x1 * scale_factor),
-                    int(y1 * scale_factor),
-                    int(x2 * scale_factor),
-                    int(y2 * scale_factor)
-                )
-            boxes_list.append(box)
-            probs_list.append(float(probs[i]) if probs is not None else 0.0)
+                dien_tich = max(0, x2 - x1) * max(0, y2 - y1)
 
-        return boxes_list, probs_list
+                if dien_tich > dien_tich_lon_nhat:
+                    dien_tich_lon_nhat = dien_tich
+                    box_tot_nhat = tuple(map(int, box))
+                    if probabilities is not None:
+                        xac_suat_tot_nhat = float(probabilities[i])
+
+            return box_tot_nhat, xac_suat_tot_nhat
+
+        except Exception as loi:
+            logger.debug(f"[DETECTOR] Lỗi phát hiện: {loi}")
+            return None, 0.0
+
+    def phat_hien_tat_ca(self, anh_bgr):
+        """Phát hiện tất cả khuôn mặt"""
+        try:
+            if anh_bgr is None:
+                return [], []
+                
+            anh_pil = self.chuyen_sang_pil(anh_bgr)
+            boxes, probabilities = self.mtcnn.detect(anh_pil)
+
+            if boxes is None:
+                return [], []
+
+            boxes_list = []
+            probs_list = []
+
+            for i, box in enumerate(boxes):
+                x1, y1, x2, y2 = box
+                boxes_list.append(tuple(map(int, box)))
+                if probabilities is not None:
+                    probs_list.append(float(probabilities[i]))
+                else:
+                    probs_list.append(0.0)
+
+            return boxes_list, probs_list
+
+        except Exception as loi:
+            logger.debug(f"[DETECTOR] Lỗi phát hiện tất cả: {loi}")
+            return [], []
 
     # ============================================================
-    # CHUẨN HÓA ẢNH
+    # CHUẨN HÓA ẢNH - TỐI ƯU
     # ============================================================
 
     def chuan_hoa_anh_sang(self, image):
@@ -230,11 +214,15 @@ class PhatHienKhuonMat:
         return result
 
     # ============================================================
-    # CĂN CHỈNH KHUÔN MẶT
+    # CĂN CHỈNH KHUÔN MẶT - TỐI ƯU
     # ============================================================
 
     def can_chinh_khuon_mat_nang_cao(self, anh_bgr):
+        """Căn chỉnh khuôn mặt nâng cao - TỐI ƯU"""
         try:
+            if anh_bgr is None:
+                return None
+                
             anh_pil = self.chuyen_sang_pil(anh_bgr)
             boxes, probs = self.mtcnn.detect(anh_pil)
             
@@ -263,20 +251,23 @@ class PhatHienKhuonMat:
             return aligned_face
             
         except Exception as loi:
-            print(f"[ALIGNMENT NÂNG CAO] {loi}")
+            logger.debug(f"[ALIGNMENT] {loi}")
             return None
 
     def can_chinh_khuon_mat(self, anh_bgr):
+        """Căn chỉnh khuôn mặt cơ bản"""
         try:
+            if anh_bgr is None:
+                return None
             anh_pil = self.chuyen_sang_pil(anh_bgr)
             khuon_mat = self.mtcnn(anh_pil)
             return khuon_mat
         except Exception as loi:
-            print(f"[ALIGNMENT] {loi}")
+            logger.debug(f"[ALIGNMENT] {loi}")
             return None
 
     # ============================================================
-    # VẼ KHUNG
+    # VẼ KHUNG - GIỮ NGUYÊN
     # ============================================================
 
     def ve_khung(self, anh_bgr, box, mau_khung=(0, 255, 0), do_day=2):

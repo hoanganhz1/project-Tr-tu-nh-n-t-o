@@ -9,6 +9,7 @@ import numpy as np
 
 from app.config.settings import TEP_CSDL
 from app.database.models import NguoiDung
+from app.utils.logger import logger
 
 
 class CoSoDuLieu:
@@ -50,7 +51,9 @@ class CoSoDuLieu:
             print(f"[DATABASE] Không thể đọc JSON: {loi}")
             self.danh_sach_nguoi = []
 
+    # Trong method luu_du_lieu(), sửa thành:
     def luu_du_lieu(self):
+        """Lưu dữ liệu với cơ chế backup"""
         du_lieu = {
             "version": 1,
             "model": {
@@ -62,8 +65,32 @@ class CoSoDuLieu:
             "users": [nguoi.to_dict() for nguoi in self.danh_sach_nguoi]
         }
 
-        with open(self.tep_csdL, "w", encoding="utf-8") as tep:
-            json.dump(du_lieu, tep, ensure_ascii=False, indent=2)
+        # ✅ SỬA: Ghi vào file tạm trước
+        temp_file = self.tep_csdL + ".tmp"
+        try:
+            with open(temp_file, "w", encoding="utf-8") as tep:
+                json.dump(du_lieu, tep, ensure_ascii=False, indent=2)
+            
+            # Sau khi ghi thành công, rename file
+            if os.path.exists(self.tep_csdL):
+                # Tạo backup
+                backup_file = self.tep_csdL + ".backup"
+                try:
+                    os.replace(self.tep_csdL, backup_file)
+                except:
+                    pass
+            
+            os.replace(temp_file, self.tep_csdL)
+            
+        except Exception as e:
+            logger.error(f"[Database] Lỗi lưu: {e}")
+            # Xóa file tạm nếu có lỗi
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except:
+                pass
+            raise
         
         # Gọi callback khi có thay đổi
         self._notify_change()

@@ -46,6 +46,9 @@ class RecognitionPage(QWidget):
     def __init__(self, face_api):
         super().__init__()
 
+
+        self.active_workers = []
+        self.worker_mutex = QMutex()
         self.face_api = face_api
 
         # Lấy detector từ face_api
@@ -68,7 +71,7 @@ class RecognitionPage(QWidget):
         self.has_gpu = CUDA_AVAILABLE
         self.FPS_CAMERA = DEFAULT_FPS
         self.DISPLAY_INTERVAL = 16 if self.has_gpu else 33
-        self.min_process_interval = 300
+        self.min_process_interval = 500
 
         # Timer hiển thị
         self.display_timer = QTimer()
@@ -102,7 +105,9 @@ class RecognitionPage(QWidget):
         # ✅ THÊM: Biến để tránh thông báo trùng lặp
         self.last_notification = ""
         self.last_notification_time = 0
-
+        # ✅ THÊM: Cache kết quả nhận dạng để tránh xử lý lặp
+        self._last_result_cache = {}
+        self._cache_frame_hash = None
         # Load font Unicode
         self._load_unicode_font()
 
@@ -114,9 +119,36 @@ class RecognitionPage(QWidget):
     # ============================================================
     # SET ACTIVE - QUẢN LÝ TRANG
     # ============================================================
+# Trong class RecognitionPage, thêm method này
+    def _cancel_all_workers(self):
+        """Hủy tất cả worker đang chạy"""
+        with QMutexLocker(self.worker_mutex):
+            for worker in self.active_workers:
+                try:
+                    if hasattr(worker, 'cancel'):
+                        worker.cancel()
+                except:
+                    pass
+            self.active_workers.clear()
+
+    def _on_worker_finished(self, worker):
+        """Dọn dẹp worker khi hoàn thành"""
+        with QMutexLocker(self.worker_mutex):
+            if worker in self.active_workers:
+                self.active_workers.remove(worker)
+
+    def toggle_tu_dong_quet(self, checked):
+        """Bật/tắt tự động quét"""
+        self.tu_dong_quet = checked
+        if checked:
+            self.nhan_trang_thai.setText("🔄 Đang tự động quét...")
+            logger.info("[Recognition] Bật tự động quét")
+        else:
+            self.nhan_trang_thai.setText("⏸️ Tạm dừng quét")
+            logger.info("[Recognition] Tắt tự động quét")
 
     def set_active(self, active: bool):
-        """✅ THÊM: Phương thức để bật/tắt trang"""
+        """Bật/tắt trang"""
         self.active = active
         if active:
             if not self.camera_manager.is_opened():
@@ -127,12 +159,29 @@ class RecognitionPage(QWidget):
             if not self.process_timer.isActive():
                 self.process_timer.start(self.min_process_interval)
             self.hien_thi_camera.setText("📷 Camera")
-            logger.info(f"[Recognition] Active: BẬT ({self.FPS_CAMERA}fps)")
+            logger.info(f"[Recognition] Active: BẬT")
         else:
             logger.info("[Recognition] Active: TẮT")
             self._cancel_all_workers()
             self.camera_manager.pause()
             self.hien_thi_camera.setText("⏸️ Camera tạm dừng")
+            """✅ THÊM: Phương thức để bật/tắt trang"""
+            self.active = active
+            if active:
+                if not self.camera_manager.is_opened():
+                    self.camera_manager.start(fps=self.FPS_CAMERA)
+                self.camera_manager.resume()
+                if not self.display_timer.isActive():
+                    self.display_timer.start(self.DISPLAY_INTERVAL)
+                if not self.process_timer.isActive():
+                    self.process_timer.start(self.min_process_interval)
+                self.hien_thi_camera.setText("📷 Camera")
+                logger.info(f"[Recognition] Active: BẬT ({self.FPS_CAMERA}fps)")
+            else:
+                logger.info("[Recognition] Active: TẮT")
+                self._cancel_all_workers()
+                self.camera_manager.pause()
+                self.hien_thi_camera.setText("⏸️ Camera tạm dừng")
 
     def _cancel_all_workers(self):
         """Hủy tất cả worker đang chạy"""
@@ -498,6 +547,11 @@ class RecognitionPage(QWidget):
 
         self.dang_xu_ly = True
         start_time = time.time()
+        # ✅ THÊM: Kiểm tra nhanh xem có khuôn mặt không trước khi xử lý
+        box, _ = self.detector.phat_hien_nhanh(anh, scale=0.3)
+        if box is None:
+            self.dang_xu_ly = False
+            return
 
         worker = NhanDangWorker(
             face_api=self.face_api,
@@ -552,9 +606,9 @@ class RecognitionPage(QWidget):
                         }
                     """)
                     
-                    # ✅ THÊM: Thông báo bằng giọng nói
-                    self._speak_notification(f"nhận diện thành công {name}")
-                    
+                    # ✅ SỬA: Chỉ thông báo khi có sự thay đổi
+                    notification = f"nhận diện thành công {name}"
+                    self._speak_notification(notification)
                 else:
                     self.current_result = {
                         "name": "Người lạ",
@@ -613,6 +667,25 @@ class RecognitionPage(QWidget):
             self.recognizer._get_all_users()
         except Exception as e:
             logger.debug(f"[Recognition] Refresh cache: {e}")
+    def _speak_notification(self, text):
+        """
+        Phát thông báo bằng giọng nói - CÓ GIỚI HẠN TẦN SUẤT
+        """
+        current_time = time.time()
+        
+        # ✅ SỬA: Tăng thời gian chờ lên 5 giây để tránh spam
+        if text == self.last_notification and (current_time - self.last_notification_time) < 5:
+            return
+        
+        self.last_notification = text
+        self.last_notification_time = current_time
+        
+        # Phát âm thanh
+        try:
+            speak(text, voice="vi-VN")
+            logger.info(f"[Recognition] Đã phát giọng nói: {text}")
+        except Exception as e:
+            logger.error(f"[Recognition] Lỗi phát giọng nói: {e}")
 
     def _on_nhan_dang_error(self, error):
         self.dang_xu_ly = False
@@ -624,10 +697,11 @@ class RecognitionPage(QWidget):
                 self.active_workers.remove(worker)
 
     def _update_performance_label(self, process_time):
+        """Cập nhật label hiệu suất"""
         self.label_performance.setText(f"⚡ {process_time:.0f}ms")
-        if process_time < 30:
+        if process_time < 100:  # ✅ SỬA: Ngưỡng 100ms
             self.label_performance.setStyleSheet("color: #16A34A; font-size: 12px; font-weight: bold;")
-        elif process_time < 80:
+        elif process_time < 300:
             self.label_performance.setStyleSheet("color: #F59E0B; font-size: 12px; font-weight: bold;")
         else:
             self.label_performance.setStyleSheet("color: #DC2626; font-size: 12px; font-weight: bold;")

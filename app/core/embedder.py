@@ -1,6 +1,6 @@
 # app/core/embedder.py
 # ================================================================
-# EMBEDDER - ĐỒNG BỘ CHUẨN HÓA
+# EMBEDDER - ĐÃ SỬA LỖI CHẤT LƯỢNG ẢNH
 # ================================================================
 
 import cv2
@@ -49,7 +49,7 @@ class FaceEmbedder:
             lab_clahe = cv2.merge([l_clahe, a, b])
             result = cv2.cvtColor(lab_clahe, cv2.COLOR_LAB2BGR)
         except Exception as e:
-            logger.warning(f"[Embedder] Lỗi CLAHE: {e}")
+            logger.debug(f"[Embedder] Lỗi CLAHE: {e}")
             result = anh_bgr.copy()
         
         try:
@@ -72,6 +72,19 @@ class FaceEmbedder:
         
         return result
 
+    def _kiem_tra_anh_hop_le(self, anh_bgr):
+        """Kiểm tra ảnh có hợp lệ không - NỚI LỎNG ĐIỀU KIỆN"""
+        if anh_bgr is None:
+            return False
+        if not isinstance(anh_bgr, np.ndarray):
+            return False
+        if len(anh_bgr.shape) != 3:
+            return False
+        # ✅ SỬA: Giảm ngưỡng kích thước tối thiểu
+        if anh_bgr.shape[0] < 20 or anh_bgr.shape[1] < 20:
+            return False
+        return True
+
     def trich_xuat(self, anh_bgr, use_advanced=None):
         """
         Trích xuất embedding - CHUẨN HÓA ĐỒNG BỘ
@@ -81,68 +94,142 @@ class FaceEmbedder:
             use_advanced: True = có chuẩn hóa nâng cao, False = không
         
         Returns:
-            Embedding vector (512D)
+            Embedding vector (512D) hoặc None nếu thất bại
         """
+        # Kiểm tra ảnh hợp lệ
+        if not self._kiem_tra_anh_hop_le(anh_bgr):
+            logger.warning("[Embedder] ❌ Ảnh không hợp lệ")
+            return None
+        
         if use_advanced is None:
             use_advanced = self.use_advanced
         
-        # ✅ SỬA: Luôn áp dụng chuẩn hóa trước khi căn chỉnh nếu use_advanced=True
+        # Thử căn chỉnh nâng cao
+        khuon_mat = None
+        
         if use_advanced:
-            # Chuẩn hóa ảnh trước
-            anh_normalized = self.chuan_hoa_anh(anh_bgr)
-            # Căn chỉnh nâng cao trên ảnh đã chuẩn hóa
-            khuon_mat = self.detector.can_chinh_khuon_mat_nang_cao(anh_normalized)
-        else:
-            # Không chuẩn hóa, chỉ căn chỉnh cơ bản
-            khuon_mat = self.detector.can_chinh_khuon_mat(anh_bgr)
+            try:
+                # Chuẩn hóa ảnh trước
+                anh_normalized = self.chuan_hoa_anh(anh_bgr)
+                # Căn chỉnh nâng cao trên ảnh đã chuẩn hóa
+                khuon_mat = self.detector.can_chinh_khuon_mat_nang_cao(anh_normalized)
+            except Exception as e:
+                logger.debug(f"[Embedder] Lỗi căn chỉnh nâng cao: {e}")
         
         # Nếu căn chỉnh nâng cao thất bại, thử căn chỉnh cơ bản
         if khuon_mat is None:
-            logger.warning("[Embedder] Căn chỉnh nâng cao thất bại, thử cơ bản...")
-            khuon_mat = self.detector.can_chinh_khuon_mat(anh_bgr)
-            if khuon_mat is None:
-                logger.warning("[Embedder] ❌ Không thể căn chỉnh khuôn mặt")
+            try:
+                khuon_mat = self.detector.can_chinh_khuon_mat(anh_bgr)
+            except Exception as e:
+                logger.debug(f"[Embedder] Lỗi căn chỉnh cơ bản: {e}")
+        
+        # ✅ SỬA: Nếu cả hai đều thất bại, thử xử lý thủ công
+        if khuon_mat is None:
+            logger.debug("[Embedder] Căn chỉnh thất bại, thử xử lý thủ công...")
+            try:
+                # Resize ảnh về 160x160 và chuyển sang tensor
+                anh_resized = cv2.resize(anh_bgr, (160, 160))
+                anh_rgb = cv2.cvtColor(anh_resized, cv2.COLOR_BGR2RGB)
+                from PIL import Image
+                anh_pil = Image.fromarray(anh_rgb)
+                # Chuyển sang tensor và chuẩn hóa
+                import torchvision.transforms as transforms
+                transform = transforms.Compose([
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+                ])
+                khuon_mat = transform(anh_pil).unsqueeze(0).to(THIET_BI)
+                logger.debug("[Embedder] ✅ Xử lý thủ công thành công")
+            except Exception as e:
+                logger.warning(f"[Embedder] ❌ Xử lý thủ công thất bại: {e}")
                 return None
         
+        # ✅ SỬA: Nới lỏng kiểm tra chất lượng ảnh
+        if khuon_mat is not None:
+            # Chỉ kiểm tra kích thước cơ bản
+            if torch.is_tensor(khuon_mat):
+                if len(khuon_mat.shape) >= 3:
+                    h, w = khuon_mat.shape[-2], khuon_mat.shape[-1]
+                    if h < 20 or w < 20:
+                        logger.warning("[Embedder] ❌ Khuôn mặt quá nhỏ")
+                        return None
+            else:
+                try:
+                    img = np.array(khuon_mat)
+                    if img.shape[0] < 20 or img.shape[1] < 20:
+                        logger.warning("[Embedder] ❌ Khuôn mặt quá nhỏ")
+                        return None
+                except:
+                    pass
+        
         # Trích xuất embedding
-        with torch.no_grad():
-            embedding = self.model(khuon_mat.unsqueeze(0).to(THIET_BI))
-        
-        embedding = F.normalize(embedding, p=2, dim=1)
-        embedding = embedding.squeeze(0).cpu().numpy().astype(np.float32)
-        
-        if embedding.shape != (CHIEU_EMBEDDING,):
-            logger.warning(f"[Embedder] Sai chiều: {embedding.shape}")
+        try:
+            # Đảm bảo khuon_mat đúng định dạng
+            if not torch.is_tensor(khuon_mat):
+                # Nếu là PIL Image, chuyển sang tensor
+                from PIL import Image
+                if isinstance(khuon_mat, Image.Image):
+                    import torchvision.transforms as transforms
+                    transform = transforms.Compose([
+                        transforms.ToTensor(),
+                        transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+                    ])
+                    khuon_mat = transform(khuon_mat).unsqueeze(0).to(THIET_BI)
+                else:
+                    logger.warning("[Embedder] Không xác định định dạng khuôn mặt")
+                    return None
+            
+            # Đảm bảo đúng shape
+            if len(khuon_mat.shape) == 3:
+                khuon_mat = khuon_mat.unsqueeze(0)
+            
+            # Đưa về đúng device
+            if khuon_mat.device != THIET_BI:
+                khuon_mat = khuon_mat.to(THIET_BI)
+            
+            with torch.no_grad():
+                embedding = self.model(khuon_mat)
+            
+            embedding = F.normalize(embedding, p=2, dim=1)
+            embedding = embedding.squeeze(0).cpu().numpy().astype(np.float32)
+            
+            if embedding.shape != (CHIEU_EMBEDDING,):
+                logger.warning(f"[Embedder] Sai chiều: {embedding.shape}")
+                return None
+            
+            self.quality_stats["total"] += 1
+            self.quality_stats["good"] += 1
+            
+            return embedding
+            
+        except Exception as e:
+            logger.error(f"[Embedder] Lỗi trích xuất: {e}")
             return None
-        
-        self.quality_stats["total"] += 1
-        self.quality_stats["good"] += 1
-        
-        return embedding
 
     def trich_xuat_nhan_dien(self, anh_bgr, use_advanced=None, use_ensemble=False):
         """
         Trích xuất embedding cho nhận dạng - ĐỒNG BỘ VỚI ĐĂNG KÝ
-        
-        ✅ SỬA: Gọi đúng phương thức trich_xuat để đảm bảo đồng bộ
         """
         if use_advanced is None:
             use_advanced = self.use_advanced
         
-        # ✅ SỬA: Gọi trich_xuat() để đảm bảo cùng logic xử lý
         return self.trich_xuat(anh_bgr, use_advanced=use_advanced)
 
-    # ... (các phương thức khác giữ nguyên)
     # ============================================================
     # TRÍCH XUẤT BATCH - TỐI ƯU GPU
     # ============================================================
 
     def trich_xuat_batch(self, danh_sach_anh_bgr, use_advanced=True):
+        """Trích xuất batch embedding - CÓ XỬ LÝ LỖI"""
         if not danh_sach_anh_bgr:
             return []
 
         aligned_faces = []
         for anh in danh_sach_anh_bgr:
+            if not self._kiem_tra_anh_hop_le(anh):
+                aligned_faces.append(None)
+                continue
+                
             if use_advanced:
                 face = self.detector.can_chinh_khuon_mat_nang_cao(anh)
             else:
@@ -150,24 +237,34 @@ class FaceEmbedder:
             aligned_faces.append(face)
 
         valid_indices = [i for i, f in enumerate(aligned_faces) if f is not None]
+        
         if not valid_indices:
             return [None] * len(danh_sach_anh_bgr)
 
         batch_tensors = [aligned_faces[i] for i in valid_indices]
-        batch = torch.stack(batch_tensors).to(THIET_BI)
+        
+        try:
+            batch = torch.stack(batch_tensors).to(THIET_BI)
 
-        with torch.no_grad():
-            embeddings = self.model(batch)
-        embeddings = F.normalize(embeddings, p=2, dim=1)
-        embeddings = embeddings.cpu().numpy().astype(np.float32)
+            with torch.no_grad():
+                embeddings = self.model(batch)
+            embeddings = F.normalize(embeddings, p=2, dim=1)
+            embeddings = embeddings.cpu().numpy().astype(np.float32)
 
-        result = [None] * len(danh_sach_anh_bgr)
-        for idx, emb in zip(valid_indices, embeddings):
-            result[idx] = emb
+            result = [None] * len(danh_sach_anh_bgr)
+            for idx, emb in zip(valid_indices, embeddings):
+                result[idx] = emb
 
-        return result
+            return result
+        except Exception as e:
+            logger.error(f"[Embedder] Lỗi batch: {e}")
+            return [None] * len(danh_sach_anh_bgr)
 
     def trich_xuat_ensemble(self, anh_bgr, use_advanced=True):
+        """Trích xuất ensemble embedding"""
+        if not self._kiem_tra_anh_hop_le(anh_bgr):
+            return None
+            
         embeddings = []
         
         emb1 = self.trich_xuat(anh_bgr, use_advanced=use_advanced)
@@ -231,24 +328,34 @@ class FaceEmbedder:
         
         return final_embedding.astype(np.float32)
 
+    # ✅ SỬA: Nới lỏng kiểm tra chất lượng ảnh
     def kiem_tra_chat_luong_anh(self, khuon_mat):
+        """Kiểm tra chất lượng ảnh khuôn mặt - NỚI LỎNG"""
         if khuon_mat is None:
             return False
         
-        if torch.is_tensor(khuon_mat):
-            img = khuon_mat.cpu().numpy()
-        else:
-            img = np.array(khuon_mat)
-        
-        if img.shape[0] < 50 or img.shape[1] < 50:
+        try:
+            if torch.is_tensor(khuon_mat):
+                img = khuon_mat.cpu().numpy()
+            else:
+                img = np.array(khuon_mat)
+            
+            # ✅ SỬA: Giảm ngưỡng kích thước
+            if img.shape[0] < 20 or img.shape[1] < 20:
+                return False
+            
+            # ✅ SỬA: Giảm ngưỡng độ sáng
+            if np.mean(img) < 5:
+                return False
+            
+            return True
+        except:
             return False
-        
-        if np.mean(img) < 10:
-            return False
-        
-        return True
 
     def kiem_tra_chat_luong_embedding(self, embedding):
+        """Kiểm tra chất lượng embedding"""
+        if embedding is None:
+            return False
         if np.any(np.isnan(embedding)) or np.any(np.isinf(embedding)):
             return False
         
@@ -259,6 +366,7 @@ class FaceEmbedder:
         return True
 
     def tao_embedding_dai_dien(self, danh_sach_embedding):
+        """Tạo embedding đại diện từ danh sách"""
         if not danh_sach_embedding:
             logger.warning("[Embedder] Không có embedding để tạo đại diện")
             return None
@@ -288,6 +396,7 @@ class FaceEmbedder:
         return embedding_dai_dien.astype(np.float32)
 
     def get_quality_stats(self):
+        """Lấy thống kê chất lượng"""
         total = self.quality_stats["total"]
         good = self.quality_stats["good"]
         bad = self.quality_stats["bad"]

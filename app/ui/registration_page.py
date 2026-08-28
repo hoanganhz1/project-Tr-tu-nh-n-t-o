@@ -1,6 +1,6 @@
 # app/ui/registration_page.py
 # ================================================================
-# ĐĂNG KÝ KHUÔN MẶT - PHƯƠNG ÁN CŨ (ỔN ĐỊNH)
+# ĐĂNG KÝ KHUÔN MẶT - PHƯƠNG ÁN CŨ (ĐÃ SỬA LỖI)
 # ================================================================
 
 import cv2
@@ -28,13 +28,15 @@ from app.utils.logger import logger
 
 
 class RegistrationPage(QWidget):
-    """Trang đăng ký khuôn mặt - Phương án cũ ổn định"""
+    """Trang đăng ký khuôn mặt - Đã sửa lỗi"""
 
     def __init__(self, face_api, embedder):
         super().__init__()
 
         self.face_api = face_api
         self.embedder = embedder
+        
+        # ✅ SỬA LỖI: Thêm detector
         self.detector = embedder.detector
 
         # Camera Manager
@@ -68,6 +70,10 @@ class RegistrationPage(QWidget):
 
         # ThreadPool
         self.threadpool = QThreadPool.globalInstance()
+        
+        # ✅ THÊM: Danh sách worker đang chạy để cleanup
+        self.active_workers = []
+        self.worker_mutex = QMutex()
 
         # Tạo giao diện
         self.tao_giao_dien()
@@ -219,6 +225,7 @@ class RegistrationPage(QWidget):
         bo_cuc.addLayout(noi_dung)
 
     def set_active(self, active: bool):
+        """Bật/tắt trang"""
         self.active = active
         if active:
             if not self.camera_manager.is_opened():
@@ -231,9 +238,23 @@ class RegistrationPage(QWidget):
         else:
             logger.info("[Registration] Active: TẮT")
             self.camera_manager.pause()
+            # ✅ THÊM: Hủy workers khi tắt trang
+            self._cancel_all_workers()
             self.hien_thi_camera.setText("⏸️ Camera tạm dừng")
 
+    def _cancel_all_workers(self):
+        """Hủy tất cả worker đang chạy"""
+        with QMutexLocker(self.worker_mutex):
+            for worker in self.active_workers:
+                try:
+                    if hasattr(worker, 'cancel'):
+                        worker.cancel()
+                except:
+                    pass
+            self.active_workers.clear()
+
     def cap_nhat_camera(self, anh_bgr):
+        """Nhận frame từ camera"""
         if not self.active or anh_bgr is None:
             return
         
@@ -241,6 +262,7 @@ class RegistrationPage(QWidget):
             self.frame_buffer = anh_bgr.copy()
 
     def _update_display(self):
+        """Cập nhật hiển thị camera"""
         if not self.active:
             return
         
@@ -249,7 +271,7 @@ class RegistrationPage(QWidget):
                 return
             anh = self.frame_buffer.copy()
         
-        # Phát hiện và vẽ khung
+        # Phát hiện và vẽ khung - ✅ SỬA: dùng self.detector
         box, _ = self.detector.phat_hien_nhanh(anh, scale=0.5)
         if box is not None:
             mau = (0, 255, 255) if self.dang_quay else (100, 200, 100)
@@ -265,6 +287,7 @@ class RegistrationPage(QWidget):
                 self.xu_ly_anh_dang_ky()
 
     def _hien_thi_anh(self, anh_bgr):
+        """Hiển thị ảnh lên QLabel"""
         if anh_bgr is None:
             return
         try:
@@ -288,7 +311,7 @@ class RegistrationPage(QWidget):
                 return
             anh = self.frame_buffer.copy()
 
-        # Phát hiện khuôn mặt
+        # Phát hiện khuôn mặt - ✅ SỬA: dùng self.detector
         box, _ = self.detector.phat_hien(anh)
         if box is None:
             return
@@ -311,12 +334,24 @@ class RegistrationPage(QWidget):
 
         # Trích xuất embedding
         worker = TrichXuatWorker(self.embedder, face_roi, use_advanced=True)
+        
+        # ✅ THÊM: Quản lý worker
+        with QMutexLocker(self.worker_mutex):
+            self.active_workers.append(worker)
+        
         worker.signals.result.connect(self.nhan_embedding)
         worker.signals.error.connect(self.xu_ly_loi_trich_xuat)
-        worker.signals.finished.connect(self.don_dep_luong)
+        worker.signals.finished.connect(lambda: self._on_worker_finished(worker))
         self.threadpool.start(worker)
 
+    def _on_worker_finished(self, worker):
+        """Dọn dẹp worker khi hoàn thành"""
+        with QMutexLocker(self.worker_mutex):
+            if worker in self.active_workers:
+                self.active_workers.remove(worker)
+
     def nhan_embedding(self, embedding):
+        """Nhận embedding từ worker"""
         self.dang_xu_ly_anh = False
         if not self.dang_quay or embedding is None:
             return
@@ -340,13 +375,12 @@ class RegistrationPage(QWidget):
             self.ket_thuc_thu_thap()
 
     def xu_ly_loi_trich_xuat(self, error):
+        """Xử lý lỗi trích xuất"""
         self.dang_xu_ly_anh = False
         logger.error(f"[Registration] Lỗi trích xuất: {error}")
 
-    def don_dep_luong(self):
-        pass
-
     def bat_dau_dang_ky(self):
+        """Bắt đầu đăng ký"""
         if not self.o_ten.text().strip():
             QMessageBox.warning(self, "Thiếu thông tin", "Vui lòng nhập họ và tên.")
             return
@@ -469,10 +503,14 @@ class RegistrationPage(QWidget):
             self.nut_lam_moi.setEnabled(True)
 
     def lam_moi(self):
+        """Làm mới form"""
         self.dang_quay = False
         self.dang_xu_ly_anh = False
         self.danh_sach_embedding = []
         self.bo_dem_anh = 0
+        
+        # ✅ THÊM: Hủy workers khi làm mới
+        self._cancel_all_workers()
 
         self.o_ten.clear()
         self.o_tuoi.clear()
@@ -498,5 +536,7 @@ class RegistrationPage(QWidget):
         logger.info("[Registration] Đã làm mới form")
 
     def closeEvent(self, su_kien):
+        """Đóng trang"""
         self.active = False
+        self._cancel_all_workers()
         su_kien.accept()

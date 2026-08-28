@@ -1,6 +1,6 @@
 # app/ui/settings_page.py
 # ================================================================
-# CÀI ĐẶT - DÙNG LOAD/SAVE TỪ CONFIG
+# CÀI ĐẶT - DÙNG LOAD/SAVE TỪ CONFIG (ĐÃ SỬA LỖI)
 # ================================================================
 
 import os
@@ -181,7 +181,7 @@ class SettingsPage(QWidget):
         khung_nut.addStretch()
         bo_cuc.addLayout(khung_nut)
 
-        # Thông tin hệ thống
+        # Thông tin hệ thống - ✅ SỬA LỖI
         khung_thong_tin = QFrame()
         khung_thong_tin.setStyleSheet("""
             QFrame {
@@ -198,10 +198,13 @@ class SettingsPage(QWidget):
         model = getattr(settings, 'TEN_MODEL', 'vggface2')
         emb_dim = getattr(settings, 'CHIEU_EMBEDDING', 512)
         
-        # ✅ SỬA LỖI: kiểm tra CUDA_AVAILABLE từ settings
+        # ✅ SỬA LỖI: Kiểm tra CUDA_AVAILABLE
         if CUDA_AVAILABLE:
-            device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "Unknown"
-            device = f"GPU - {device_name}"
+            try:
+                device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "Unknown"
+                device = f"GPU - {device_name}"
+            except:
+                device = "GPU (CUDA)"
         else:
             device = "CPU"
 

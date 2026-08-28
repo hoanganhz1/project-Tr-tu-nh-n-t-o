@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "model": {
+    "name": "InceptionResnetV1",
+    "pretrained": "vggface2",
+    "embedding_dimension": 512,
+    "distance": "cosine"
+  },
+  "users": []
+}

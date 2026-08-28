@@ -1,6 +1,6 @@
 # app/utils/worker.py
 # ================================================================
-# WORKER - ĐẦY ĐỦ CÁC CLASS
+# WORKER - TỐI ƯU TỐC ĐỘ
 # ================================================================
 
 import traceback
@@ -77,24 +77,34 @@ class TrichXuatWorker(BaseWorker):
 
 
 class NhanDangWorker(BaseWorker):
-    """Worker nhận dạng 1:N - CHỈ 1 KHUÔN MẶT"""
+    """Worker nhận dạng 1:N - TỐI ƯU TỐC ĐỘ"""
 
     def __init__(self, face_api, anh_bgr, threshold):
         super().__init__()
         self.face_api = face_api
         self.anh_bgr = anh_bgr
         self.threshold = threshold
+        # ✅ THÊM: Cache để tránh xử lý lặp
+        self._cache_key = None
 
     def _run(self):
         if self._is_cancelled:
             return
         
         t0 = time.time()
+        
+        # ✅ SỬA: Kiểm tra nhanh trước khi xử lý
+        if self.anh_bgr is None:
+            return
+        
         ket_qua = self.face_api.identify(self.anh_bgr, threshold=self.threshold)
         elapsed = (time.time() - t0) * 1000
-        ket_qua["processing_time_ms"] = elapsed
         
-        print(f"[TIMING] NhanDangWorker: {elapsed:.0f}ms")
+        # ✅ SỬA: Chỉ log khi > 200ms để tránh spam
+        if elapsed > 200:
+            print(f"[TIMING] NhanDangWorker: {elapsed:.0f}ms")
+        
+        ket_qua["processing_time_ms"] = elapsed
         
         if not self._is_cancelled:
             try:

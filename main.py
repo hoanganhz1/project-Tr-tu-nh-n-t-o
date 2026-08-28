@@ -144,6 +144,22 @@ def khoi_tao_he_thong():
         logger.error(f"❌ LỖI KHỞI TẠO: {loi}")
         traceback.print_exc()
         return None
+def global_exception_handler(exc_type, exc_value, exc_traceback):
+    """Xử lý exception toàn cục"""
+    import traceback
+    error_msg = ''.join(traceback.format_exception(exc_type, exc_value, exc_traceback))
+    logger.error(f"Uncaught exception:\n{error_msg}")
+    
+    # Hiển thị dialog lỗi
+    try:
+        from PyQt5.QtWidgets import QMessageBox
+        QMessageBox.critical(
+            None,
+            "Lỗi chương trình",
+            f"Đã xảy ra lỗi không mong muốn:\n\n{exc_value}\n\nVui lòng kiểm tra log để biết thêm chi tiết."
+        )
+    except:
+        pass
 
 # ================================================================
 # MAIN
@@ -151,7 +167,7 @@ def khoi_tao_he_thong():
 
 def main():
     """Điểm chạy chính"""
-
+    sys.excepthook = global_exception_handler
     logger.info("🔄 Bắt đầu chương trình...")
 
     # Tạo ứng dụng PyQt
