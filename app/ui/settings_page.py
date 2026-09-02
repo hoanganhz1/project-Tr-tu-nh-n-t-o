@@ -1,11 +1,11 @@
 # app/ui/settings_page.py
 # ================================================================
-# CÀI ĐẶT - DÙNG LOAD/SAVE TỪ CONFIG (ĐÃ SỬA LỖI)
+# CÀI ĐẶT - DÙNG LOAD/SAVE TỪ CONFIG + ĐỔI CAMERA
 # ================================================================
 
 import os
 import json
-import torch  # ✅ THÊM IMPORT NÀY
+import torch
 
 from PyQt5.QtWidgets import (
     QWidget,
@@ -16,7 +16,8 @@ from PyQt5.QtWidgets import (
     QFrame,
     QPushButton,
     QMessageBox,
-    QGroupBox
+    QGroupBox,
+    QComboBox  # ✅ THÊM
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 
@@ -29,12 +30,14 @@ from app.config.constants import (
 )
 from app.config.settings import CUDA_AVAILABLE, THIET_BI
 from app.utils.logger import logger
+from app.utils.camera_manager import CameraManager  # ✅ THÊM
 
 
 class SettingsPage(QWidget):
-    """Trang cài đặt - TỰ ĐỘNG LOAD/SAVE"""
+    """Trang cài đặt - TỰ ĐỘNG LOAD/SAVE + ĐỔI CAMERA"""
 
     threshold_changed = pyqtSignal(float, float)
+    camera_changed = pyqtSignal(int)  # ✅ THÊM
 
     def __init__(self):
         super().__init__()
@@ -50,7 +53,14 @@ class SettingsPage(QWidget):
             DEFAULT_XAC_MINH_THRESHOLD
         )
 
+        # ✅ THÊM: Camera Manager
+        self.camera_manager = CameraManager()
+        self.available_cameras = []
+
         self.tao_giao_dien()
+        
+        # ✅ THÊM: Quét camera khi mở
+        self.quet_camera()
 
     def tao_giao_dien(self):
         bo_cuc = QVBoxLayout(self)
@@ -58,7 +68,9 @@ class SettingsPage(QWidget):
 
         bo_cuc.addWidget(QLabel("<h1>⚙️ CÀI ĐẶT THUẬT TOÁN</h1>"))
 
-        # Threshold nhận dạng
+        # ============================================================
+        # THRESHOLD NHẬN DẠNG (GIỮ NGUYÊN)
+        # ============================================================
         khung_nhan_dang = QFrame()
         khung_nhan_dang.setStyleSheet("""
             QFrame {
@@ -107,7 +119,9 @@ class SettingsPage(QWidget):
 
         bo_cuc.addWidget(khung_nhan_dang)
 
-        # Threshold xác minh
+        # ============================================================
+        # THRESHOLD XÁC MINH (GIỮ NGUYÊN)
+        # ============================================================
         khung_xac_minh = QFrame()
         khung_xac_minh.setStyleSheet("""
             QFrame {
@@ -156,7 +170,85 @@ class SettingsPage(QWidget):
 
         bo_cuc.addWidget(khung_xac_minh)
 
-        # Nút lưu
+        # ============================================================
+        # ✅ THÊM: CÀI ĐẶT CAMERA (CHÈN VÀO GIỮA)
+        # ============================================================
+        khung_camera = QFrame()
+        khung_camera.setStyleSheet("""
+            QFrame {
+                background: white;
+                border: 1px solid #E2E8F0;
+                border-radius: 16px;
+            }
+        """)
+
+        layout_camera = QVBoxLayout(khung_camera)
+        layout_camera.setContentsMargins(30, 20, 30, 20)
+
+        header_camera = QHBoxLayout()
+        header_camera.addWidget(QLabel("<b>📷 Chọn Camera</b>"))
+        header_camera.addStretch()
+        layout_camera.addLayout(header_camera)
+
+        # Dòng chọn camera
+        row_camera = QHBoxLayout()
+        row_camera.addWidget(QLabel("Camera:"))
+
+        self.cbx_camera = QComboBox()
+        self.cbx_camera.setMinimumWidth(200)
+        self.cbx_camera.setStyleSheet("""
+            QComboBox {
+                padding: 6px 12px;
+                border: 1px solid #E2E8F0;
+                border-radius: 6px;
+                background: white;
+            }
+            QComboBox:hover {
+                border-color: #94A3B8;
+            }
+        """)
+        self.cbx_camera.currentIndexChanged.connect(self.doi_camera)
+        row_camera.addWidget(self.cbx_camera)
+
+        self.nut_quet = QPushButton("🔍 Quét")
+        self.nut_quet.clicked.connect(self.quet_camera)
+        self.nut_quet.setFixedWidth(80)
+        self.nut_quet.setStyleSheet("""
+            QPushButton {
+                background-color: #64748B;
+                color: white;
+                border: none;
+                border-radius: 6px;
+                padding: 6px 15px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #475569;
+            }
+        """)
+        row_camera.addWidget(self.nut_quet)
+
+        row_camera.addStretch()
+        layout_camera.addLayout(row_camera)
+
+        # Trạng thái camera
+        self.label_cam_status = QLabel("🔄 Đang kiểm tra camera...")
+        self.label_cam_status.setStyleSheet("""
+            QLabel {
+                padding: 5px 10px;
+                border-radius: 6px;
+                font-weight: bold;
+                color: #475569;
+            }
+        """)
+        layout_camera.addWidget(self.label_cam_status)
+
+        # ✅ CHÈN VÀO SAU THRESHOLD XÁC MINH, TRƯỚC NÚT LƯU
+        bo_cuc.insertWidget(3, khung_camera)  # Index 3 = sau khung xác minh
+
+        # ============================================================
+        # NÚT LƯU (GIỮ NGUYÊN)
+        # ============================================================
         khung_nut = QHBoxLayout()
         khung_nut.addStretch()
 
@@ -181,7 +273,9 @@ class SettingsPage(QWidget):
         khung_nut.addStretch()
         bo_cuc.addLayout(khung_nut)
 
-        # Thông tin hệ thống - ✅ SỬA LỖI
+        # ============================================================
+        # THÔNG TIN HỆ THỐNG (GIỮ NGUYÊN)
+        # ============================================================
         khung_thong_tin = QFrame()
         khung_thong_tin.setStyleSheet("""
             QFrame {
@@ -198,7 +292,6 @@ class SettingsPage(QWidget):
         model = getattr(settings, 'TEN_MODEL', 'vggface2')
         emb_dim = getattr(settings, 'CHIEU_EMBEDDING', 512)
         
-        # ✅ SỬA LỖI: Kiểm tra CUDA_AVAILABLE
         if CUDA_AVAILABLE:
             try:
                 device_name = torch.cuda.get_device_name(0) if torch.cuda.is_available() else "Unknown"
@@ -218,6 +311,10 @@ class SettingsPage(QWidget):
         bo_cuc.addWidget(khung_thong_tin)
 
         bo_cuc.addStretch()
+
+    # ============================================================
+    # HÀM XỬ LÝ THRESHOLD (GIỮ NGUYÊN)
+    # ============================================================
 
     def on_nhan_dang_changed(self, value):
         self.threshold_nhan_dang = value / 100.0
@@ -253,3 +350,90 @@ class SettingsPage(QWidget):
         except Exception as loi:
             logger.error(f"[Settings] Lỗi lưu: {loi}")
             QMessageBox.critical(self, "Lỗi", f"Không thể lưu cài đặt:\n{loi}")
+
+    # ============================================================
+    # ✅ THÊM: HÀM XỬ LÝ CAMERA
+    # ============================================================
+
+    def quet_camera(self):
+        """Quét camera khả dụng"""
+        self.label_cam_status.setText("🔄 Đang quét camera...")
+        self.label_cam_status.setStyleSheet("""
+            QLabel {
+                padding: 5px 10px;
+                border-radius: 6px;
+                font-weight: bold;
+                color: #D97706;
+                background: #FEF3C7;
+            }
+        """)
+        
+        self.available_cameras = self.camera_manager.scan_cameras(max_cameras=10)
+        
+        self.cbx_camera.clear()
+        if self.available_cameras:
+            for cam_id in self.available_cameras:
+                self.cbx_camera.addItem(f"Camera {cam_id}")
+            
+            # Chọn camera hiện tại
+            current = self.camera_manager.camera_id
+            if current in self.available_cameras:
+                idx = self.available_cameras.index(current)
+                self.cbx_camera.setCurrentIndex(idx)
+            
+            self.label_cam_status.setText(f"✅ Tìm thấy {len(self.available_cameras)} camera")
+            self.label_cam_status.setStyleSheet("""
+                QLabel {
+                    padding: 5px 10px;
+                    border-radius: 6px;
+                    font-weight: bold;
+                    color: #16A34A;
+                    background: #F0FDF4;
+                }
+            """)
+        else:
+            self.cbx_camera.addItem("❌ Không tìm thấy camera")
+            self.cbx_camera.setEnabled(False)
+            self.label_cam_status.setText("❌ Không tìm thấy camera nào")
+            self.label_cam_status.setStyleSheet("""
+                QLabel {
+                    padding: 5px 10px;
+                    border-radius: 6px;
+                    font-weight: bold;
+                    color: #DC2626;
+                    background: #FEF2F2;
+                }
+            """)
+
+    def doi_camera(self, index):
+        """Đổi sang camera khác"""
+        if index < 0 or index >= len(self.available_cameras):
+            return
+        
+        camera_id = self.available_cameras[index]
+        
+        # Chuyển camera
+        if self.camera_manager.switch_to_camera(camera_id):
+            self.label_cam_status.setText(f"✅ Đã chuyển sang Camera {camera_id}")
+            self.label_cam_status.setStyleSheet("""
+                QLabel {
+                    padding: 5px 10px;
+                    border-radius: 6px;
+                    font-weight: bold;
+                    color: #16A34A;
+                    background: #F0FDF4;
+                }
+            """)
+            self.camera_changed.emit(camera_id)
+            logger.info(f"[Settings] Đã chuyển sang camera {camera_id}")
+        else:
+            self.label_cam_status.setText(f"❌ Không thể mở Camera {camera_id}")
+            self.label_cam_status.setStyleSheet("""
+                QLabel {
+                    padding: 5px 10px;
+                    border-radius: 6px;
+                    font-weight: bold;
+                    color: #DC2626;
+                    background: #FEF2F2;
+                }
+            """)
